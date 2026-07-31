@@ -1,0 +1,586 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>デジタル教師手帳</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* ローディングアニメーション (波紋とドット) */
+    .ripple-loader {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      border: 3px solid #3b82f6;
+      animation: ripple 1.2s infinite ease-in-out;
+    }
+    @keyframes ripple {
+      0% { transform: scale(0.8); opacity: 1; }
+      100% { transform: scale(2); opacity: 0; }
+    }
+
+    .loading-dots::after {
+      content: '';
+      animation: dots 1.5s steps(4, end) infinite;
+    }
+    @keyframes dots {
+      0%, 20% { content: ''; }
+      40% { content: '.'; }
+      60% { content: '..'; }
+      80%, 100% { content: '...'; }
+    }
+
+    /* スワイプ遷移アニメーション */
+    .slide-enter-right {
+      animation: slideInRight 0.3s ease-out forwards;
+    }
+    .slide-enter-left {
+      animation: slideInLeft 0.3s ease-out forwards;
+    }
+    @keyframes slideInRight {
+      from { transform: translateX(100%); opacity: 0.5; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+    @keyframes slideInLeft {
+      from { transform: translateX(-100%); opacity: 0.5; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+
+    /* 週授業ビューの均等割りハック (1〜6限) */
+    .matrix-table {
+      width: 100%;
+      height: 100%;
+      border-collapse: collapse;
+    }
+    .matrix-table tbody {
+      height: 100%;
+    }
+    .matrix-table tr {
+      /* テーブルの行を画面高さに合わせて均等に分割するハック */
+      height: 1%; 
+    }
+    .matrix-table td, .matrix-table th {
+      border: 1px solid #e5e7eb;
+      padding: 4px;
+      vertical-align: top;
+    }
+    
+    /* スクロールバー非表示（スマートフォンのネイティブアプリ感を出すため） */
+    ::-webkit-scrollbar {
+      display: none;
+    }
+  </style>
+</head>
+<body class="bg-gray-100 text-gray-800 font-sans h-screen flex flex-col overflow-hidden">
+
+  <!-- ヘッダー -->
+  <header class="bg-gray-800 text-white p-3 flex justify-between items-center shadow-md z-20">
+    <h1 class="text-lg font-bold truncate flex-shrink-0 mr-2">📖 デジタル教師手帳</h1>
+    
+    <!-- ビュー切り替えナビゲーション -->
+    <nav class="flex space-x-1 bg-gray-700 rounded-lg p-1 text-sm overflow-x-auto flex-1 justify-center hide-scrollbar" id="view-tabs">
+      <button data-view="month" class="tab-btn px-2 py-1 md:px-3 rounded-md bg-white text-gray-800 font-bold whitespace-nowrap">月</button>
+      <button data-view="week" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">週</button>
+      <button data-view="day" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">日</button>
+      <button data-view="class-matrix" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">週授業</button>
+      <button data-view="agenda" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">一覧</button>
+    </nav>
+    
+    <div class="flex items-center ml-2">
+      <button id="btn-scan" class="bg-blue-600 hover:bg-blue-500 p-1 md:px-3 md:py-1 rounded text-sm flex items-center shadow whitespace-nowrap">
+        <span class="mr-1">📸</span> <span class="hidden md:inline">週報スキャン</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- メインコンテンツ（スワイプ領域） -->
+  <main id="swipe-container" class="flex-1 overflow-hidden relative p-2 touch-pan-y">
+    <!-- 各ビューのコンテナ -->
+    <div id="view-container" class="bg-white h-full rounded-xl shadow-lg border border-gray-200 overflow-y-auto transition-transform duration-300">
+      <!-- JavaScriptでここにUIを描画 -->
+    </div>
+  </main>
+
+  <!-- フッター（技術科コマ数カウント等） -->
+  <footer id="footer-stats" class="bg-white border-t px-4 py-2 text-sm text-gray-600 hidden">
+    技術科 授業数: <span id="tech-class-count" class="font-bold text-blue-600">0</span> コマ
+  </footer>
+
+  <!-- Gemini スキャンモーダル -->
+  <div id="scan-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 flex flex-col max-h-full">
+      <h2 class="text-xl font-bold mb-4 border-b pb-2">週報から予定を追加</h2>
+      <p class="text-sm text-gray-500 mb-4">週報の画像をアップロードすると、Gemini AIが自動で「学校行事」「自身の予定」「時間割変更」を抽出します。</p>
+      <input type="file" id="file-upload" accept="image/*,application/pdf" class="mb-4 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100" />
+      
+      <!-- 解析中のプログレス表示 -->
+      <div id="scan-progress" class="hidden flex-col items-center justify-center py-6">
+        <div class="ripple-loader mb-4"></div>
+        <p class="text-sm text-gray-600 font-semibold loading-dots">Geminiが予定を抽出中</p>
+      </div>
+
+      <!-- 解析結果の編集エリア -->
+      <div id="scan-result-area" class="hidden flex-1 overflow-y-auto mb-4 border rounded p-2 bg-gray-50 min-h-[150px]">
+        <ul id="extracted-events-list" class="space-y-2"></ul>
+      </div>
+
+      <div class="flex justify-end space-x-2 mt-auto">
+        <button id="btn-cancel-scan" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded text-gray-700 font-semibold">キャンセル</button>
+        <button id="btn-apply-scan" class="hidden px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-semibold shadow">カレンダーに反映</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 日ビュー用 手書きメモモーダル -->
+  <div id="canvas-modal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center">
+    <div class="bg-white rounded-lg p-2 w-[95%] h-[90%] flex flex-col">
+      <div class="flex justify-between items-center mb-2 px-2 border-b pb-2">
+        <h3 class="font-bold text-gray-700" id="memo-date-title">手書きメモ</h3>
+        <button id="btn-close-canvas" class="text-red-500 font-bold px-2 py-1 bg-red-50 rounded">閉じる</button>
+      </div>
+      <canvas id="memo-canvas" class="flex-1 border bg-yellow-50 rounded-lg touch-none"></canvas>
+      <div class="mt-3 flex justify-between items-center px-2">
+        <button id="btn-clear-canvas" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded text-sm font-semibold">消去</button>
+        <button id="btn-save-canvas" class="px-6 py-2 bg-green-600 hover:bg-green-700 text-white rounded text-sm font-bold shadow">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    document.addEventListener('DOMContentLoaded', () => {
+      // === 状態管理とストレージ ===
+      const STORAGE_KEY_DATA = 'teacher_planner_all_data';
+      const STORAGE_KEY_SETTINGS = 'teacher_planner_settings';
+      
+      let appState = {
+        currentView: 'month',
+        currentDate: new Date(),
+        allData: JSON.parse(localStorage.getItem(STORAGE_KEY_DATA)) || {},
+        settings: JSON.parse(localStorage.getItem(STORAGE_KEY_SETTINGS)) || {
+          basicTimetable: {},
+          scheduleTimes: {}
+        }
+      };
+
+      // テスト用初期データの設定
+      const todayStr = appState.currentDate.toISOString().split('T')[0];
+      if (!appState.allData[todayStr]) {
+        appState.allData[todayStr] = {
+          timetableType: '通常',
+          events: ['14:00 職員会議', '16:00 部活動（グラウンド）'],
+          memo: null
+        };
+      }
+
+      function saveData() {
+        localStorage.setItem(STORAGE_KEY_DATA, JSON.stringify(appState.allData));
+      }
+
+      // === ビューの切り替え制御 ===
+      const viewTabs = document.querySelectorAll('.tab-btn');
+      const viewContainer = document.getElementById('view-container');
+      const footerStats = document.getElementById('footer-stats');
+
+      viewTabs.forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          const view = e.target.dataset.view;
+          appState.currentView = view;
+          
+          // タブの見た目更新
+          viewTabs.forEach(t => {
+            t.classList.remove('bg-white', 'text-gray-800', 'font-bold');
+            t.classList.add('text-gray-300');
+          });
+          e.target.classList.remove('text-gray-300');
+          e.target.classList.add('bg-white', 'text-gray-800', 'font-bold');
+          
+          renderView();
+        });
+      });
+
+      function renderView(animationClass = '') {
+        viewContainer.className = `bg-white h-full rounded-xl shadow-lg border border-gray-200 overflow-y-auto ${animationClass}`;
+        viewContainer.innerHTML = ''; // クリア
+        footerStats.classList.add('hidden');
+
+        switch (appState.currentView) {
+          case 'month':
+            renderMonthView();
+            break;
+          case 'week':
+            viewContainer.innerHTML = `<div class="p-4"><h2 class="font-bold text-xl mb-4">週間ビュー</h2><p class="text-gray-500">（時間割や週間の予定を表示する領域）</p></div>`;
+            break;
+          case 'day':
+            renderDayView();
+            break;
+          case 'class-matrix':
+            renderClassMatrix();
+            break;
+          case 'agenda':
+            viewContainer.innerHTML = `<div class="p-4"><h2 class="font-bold text-xl mb-4">一覧（アジェンダ）</h2><p class="text-gray-500">（リスト形式で今後の予定を表示）</p></div>`;
+            break;
+        }
+
+        // アニメーションクラスを一定時間後に削除
+        if (animationClass) {
+          setTimeout(() => {
+            viewContainer.classList.remove(animationClass);
+          }, 300);
+        }
+      }
+
+      // === 月間ビュー描画（モック） ===
+      function renderMonthView() {
+        let html = `
+          <div class="h-full flex flex-col">
+            <div class="p-3 border-b flex justify-between items-center bg-gray-50">
+              <h2 class="font-bold text-lg">${appState.currentDate.getFullYear()}年 ${appState.currentDate.getMonth() + 1}月</h2>
+            </div>
+            <div class="flex-1 grid grid-cols-7 gap-px bg-gray-200 border-b">
+        `;
+        const days = ['日', '月', '火', '水', '木', '金', '土'];
+        days.forEach(d => {
+          html += `<div class="bg-gray-100 text-center py-1 text-xs font-semibold text-gray-600">${d}</div>`;
+        });
+        // カレンダーマスの生成（35マス）
+        for (let i = 1; i <= 35; i++) {
+          const dateNum = i <= 31 ? i : '';
+          html += `
+            <div class="bg-white p-1 h-20 md:h-24 flex flex-col hover:bg-gray-50 transition-colors border-b border-r">
+              <span class="text-right text-xs text-gray-500">${dateNum}</span>
+              ${i === 15 ? '<div class="text-[10px] bg-red-100 text-red-700 p-0.5 rounded mt-1 truncate">職員会議</div>' : ''}
+              ${i === 16 ? '<div class="text-[10px] bg-purple-100 text-purple-700 p-0.5 rounded mt-1 truncate">生徒会</div>' : ''}
+            </div>
+          `;
+        }
+        html += `</div></div>`;
+        viewContainer.innerHTML = html;
+      }
+
+      // === 日ビュー描画 (特設日課ハイライトとメモ機能) ===
+      function renderDayView() {
+        const dateObj = appState.currentDate;
+        const todayStr = dateObj.toISOString().split('T')[0];
+        const displayDate = `${dateObj.getFullYear()}年${dateObj.getMonth() + 1}月${dateObj.getDate()}日`;
+        
+        const todayData = appState.allData[todayStr] || { timetableType: '通常', events: [] };
+        
+        // 日課によって色を変更
+        const dateColor = (todayData.timetableType === '短縮' || todayData.timetableType.includes('テスト')) ? 'text-red-600 bg-red-50' : 'text-gray-800 bg-gray-100';
+
+        let html = `
+          <div class="p-4 h-full flex flex-col">
+            <div class="flex justify-between items-center mb-4 border-b pb-4">
+              <div>
+                <h2 class="text-2xl font-bold text-gray-800">${displayDate}</h2>
+                <span class="inline-block mt-1 px-2 py-0.5 rounded text-sm font-semibold border ${dateColor}">${todayData.timetableType}日課</span>
+              </div>
+              <button id="btn-open-memo" class="bg-yellow-100 hover:bg-yellow-200 text-yellow-800 px-4 py-2 rounded-lg shadow-sm font-bold flex items-center transition-colors">
+                <span class="mr-1">✍️</span> メモ
+              </button>
+            </div>
+            
+            <div class="flex-1 overflow-auto">
+              <h3 class="font-bold text-gray-600 mb-2 border-l-4 border-blue-500 pl-2">本日の予定</h3>
+              <ul class="space-y-2 mb-6">
+        `;
+
+        if (todayData.events && todayData.events.length > 0) {
+          todayData.events.forEach(e => {
+            html += `<li class="p-3 bg-blue-50 text-blue-900 rounded border border-blue-100 shadow-sm flex items-center"><span class="w-2 h-2 bg-blue-500 rounded-full mr-3"></span>${e}</li>`;
+          });
+        } else {
+          html += `<li class="text-gray-500 italic p-2">予定はありません</li>`;
+        }
+
+        html += `
+              </ul>
+              
+              <h3 class="font-bold text-gray-600 mb-2 border-l-4 border-green-500 pl-2">タスク / 授業の進捗</h3>
+              <div class="p-4 bg-gray-50 rounded border border-dashed border-gray-300 text-sm text-gray-500 text-center">
+                タスク管理コンポーネントをここに配置
+              </div>
+            </div>
+          </div>
+        `;
+
+        viewContainer.innerHTML = html;
+        document.getElementById('btn-open-memo').addEventListener('click', openCanvasModal);
+      }
+
+      // === 週授業ビュー描画 (均等割りハックと技術科カウント) ===
+      function renderClassMatrix() {
+        footerStats.classList.remove('hidden');
+        let techCount = 0;
+        
+        let html = `
+          <div class="h-full flex flex-col">
+            <table class="matrix-table text-xs md:text-sm bg-white">
+              <thead>
+                <tr class="bg-gray-100 text-gray-600 border-b-2 border-gray-300">
+                  <th class="w-8 md:w-12 border-r-2 border-gray-300">限</th>
+                  <th class="w-[18%]">月</th><th class="w-[18%]">火</th><th class="w-[18%]">水</th><th class="w-[18%]">木</th><th class="w-[18%]">金</th>
+                </tr>
+              </thead>
+              <tbody>
+        `;
+        
+        const classes = [
+          ['1年1組', '', '2年3組 技術', '', '3年2組'],
+          ['2年1組 技術', '3年1組', '', '1年2組', ''],
+          ['', '2年2組 技術', '1年3組', '', '3年3組'],
+          ['3年1組', '', '', '2年1組 技術', '1年1組'],
+          ['会議', '会議', '学年集会', '会議', 'LHR'],
+          ['', '', '委員会', '', '清掃']
+        ];
+
+        for (let period = 1; period <= 6; period++) {
+          html += `<tr><td class="text-center font-bold text-gray-600 bg-gray-100 border-r-2 border-gray-300 align-middle">${period}</td>`;
+          for (let day = 0; day < 5; day++) {
+            let cellText = classes[period-1][day] || '';
+            let cellClass = "";
+            if (cellText.includes('技術')) {
+              techCount++;
+              cellClass = "bg-blue-50 text-blue-800 font-bold border-blue-200";
+            } else if (cellText.includes('会議') || cellText.includes('集会')) {
+              cellClass = "bg-red-50 text-red-800 border-red-200";
+            }
+            html += `<td class="p-1 md:p-2 ${cellClass}"><div class="h-full flex items-center justify-center text-center break-words">${cellText}</div></td>`;
+          }
+          html += `</tr>`;
+        }
+        html += `</tbody></table></div>`;
+        
+        viewContainer.innerHTML = html;
+        document.getElementById('tech-class-count').textContent = techCount;
+      }
+
+      // === スワイプ遷移の実装 ===
+      const swipeZone = document.getElementById('swipe-container');
+      let touchStartX = 0;
+      let touchEndX = 0;
+      let touchStartY = 0;
+      let touchEndY = 0;
+
+      swipeZone.addEventListener('touchstart', e => { 
+        touchStartX = e.changedTouches[0].screenX; 
+        touchStartY = e.changedTouches[0].screenY;
+      }, {passive: true});
+      
+      swipeZone.addEventListener('touchend', e => {
+        touchEndX = e.changedTouches[0].screenX;
+        touchEndY = e.changedTouches[0].screenY;
+        handleSwipe();
+      }, {passive: true});
+
+      function handleSwipe() {
+        const swipeThresholdX = 60;
+        const swipeThresholdY = 40; // 縦スクロールと誤認しないため
+        
+        const diffX = touchEndX - touchStartX;
+        const diffY = Math.abs(touchEndY - touchStartY);
+
+        // 横方向へのスワイプであり、かつ縦方向の移動が少ない場合のみ遷移処理を行う
+        if (Math.abs(diffX) > swipeThresholdX && diffY < swipeThresholdY) {
+          let changeDays = 1;
+          if (appState.currentView === 'week' || appState.currentView === 'class-matrix') {
+            changeDays = 7;
+          } else if (appState.currentView === 'month') {
+            // 簡易的に30日とする
+            changeDays = 30; 
+          }
+
+          if (diffX < 0) {
+            // 左スワイプ（次へ）
+            appState.currentDate.setDate(appState.currentDate.getDate() + changeDays);
+            renderView('slide-enter-right');
+          } else {
+            // 右スワイプ（前へ）
+            appState.currentDate.setDate(appState.currentDate.getDate() - changeDays);
+            renderView('slide-enter-left');
+          }
+        }
+      }
+
+      // === Gemini API 週報スキャン (モック付き) ===
+      const apiKey = ""; // API Key
+
+      document.getElementById('btn-scan').addEventListener('click', () => {
+        document.getElementById('scan-modal').classList.remove('hidden');
+        document.getElementById('file-upload').value = '';
+        document.getElementById('scan-progress').classList.add('hidden');
+        document.getElementById('scan-result-area').classList.add('hidden');
+        document.getElementById('btn-apply-scan').classList.add('hidden');
+      });
+
+      document.getElementById('btn-cancel-scan').addEventListener('click', () => {
+        document.getElementById('scan-modal').classList.add('hidden');
+      });
+
+      document.getElementById('file-upload').addEventListener('change', async (e) => {
+        if (!e.target.files[0]) return;
+        
+        document.getElementById('scan-progress').classList.remove('hidden');
+        document.getElementById('scan-result-area').classList.add('hidden');
+        document.getElementById('btn-apply-scan').classList.add('hidden');
+        
+        // 実際の運用ではFileオブジェクトをBase64化してAPIへ送信
+        const file = e.target.files[0];
+        
+        try {
+          // モックによる遅延処理
+          const extractedData = await mockGeminiAPI(file);
+          document.getElementById('scan-progress').classList.add('hidden');
+          showExtractionResults(extractedData);
+        } catch (error) {
+          document.getElementById('scan-progress').classList.add('hidden');
+          alert("予定の抽出に失敗しました。");
+        }
+      });
+
+      // APIコールのモック関数
+      function mockGeminiAPI(file) {
+        return new Promise(resolve => {
+          setTimeout(() => {
+            const dateStr = appState.currentDate.toISOString().split('T')[0];
+            resolve([
+              { date: dateStr, type: '学校', text: '全校集会（短縮日課）' },
+              { date: dateStr, type: '岡本', text: '14:00 教科部会' },
+              { date: dateStr, type: '変更', text: '3限の授業カット' }
+            ]);
+          }, 2000); // 2秒のローディング演出
+        });
+      }
+
+      function showExtractionResults(events) {
+        const list = document.getElementById('extracted-events-list');
+        list.innerHTML = events.map((ev, idx) => {
+          let badgeColor = "bg-gray-200 text-gray-700";
+          if (ev.type === '学校') badgeColor = "bg-red-100 text-red-700";
+          if (ev.type === '岡本') badgeColor = "bg-blue-100 text-blue-700";
+          if (ev.type === '変更') badgeColor = "bg-yellow-100 text-yellow-700";
+
+          return `
+            <li class="flex justify-between items-center bg-white p-3 rounded shadow-sm border text-sm transition-opacity" id="scan-item-${idx}">
+              <div class="flex-1 mr-2">
+                <div class="flex items-center mb-1">
+                  <span class="font-bold text-gray-700 mr-2">${ev.date}</span>
+                  <span class="${badgeColor} text-[10px] font-bold px-2 py-0.5 rounded-full">${ev.type}</span>
+                </div>
+                <input type="text" value="${ev.text}" class="w-full border-gray-300 rounded text-sm px-2 py-1 bg-gray-50 focus:bg-white focus:ring-1 focus:ring-blue-500 outline-none">
+              </div>
+              <button class="text-red-500 hover:bg-red-50 p-2 rounded-full transition-colors" onclick="document.getElementById('scan-item-${idx}').remove()" title="削除">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                  <path fill-rule="evenodd" d="M9 2a1 1 0 00-.894.553L7.382 4H4a1 1 0 000 2v10a2 2 0 002 2h8a2 2 0 002-2V6a1 1 0 100-2h-3.382l-.724-1.447A1 1 0 0011 2H9zM7 8a1 1 0 012 0v6a1 1 0 11-2 0V8zm5-1a1 1 0 00-1 1v6a1 1 0 102 0V8a1 1 0 00-1-1z" clip-rule="evenodd" />
+                </svg>
+              </button>
+            </li>
+          `;
+        }).join('');
+        
+        document.getElementById('scan-result-area').classList.remove('hidden');
+        document.getElementById('btn-apply-scan').classList.remove('hidden');
+      }
+
+      document.getElementById('btn-apply-scan').addEventListener('click', () => {
+        // 実際の運用ではリスト内のinput要素の値を収集してallDataに保存する
+        alert("抽出した予定をカレンダーに反映しました。");
+        document.getElementById('scan-modal').classList.add('hidden');
+      });
+
+      // === Canvas 手書きメモ機能 ===
+      const canvasModal = document.getElementById('canvas-modal');
+      const canvas = document.getElementById('memo-canvas');
+      const ctx = canvas.getContext('2d');
+      let isDrawing = false;
+
+      function openCanvasModal() {
+        const dateObj = appState.currentDate;
+        document.getElementById('memo-date-title').textContent = `${dateObj.getMonth() + 1}月${dateObj.getDate()}日のメモ`;
+        
+        canvasModal.classList.remove('hidden');
+        
+        // setTimeoutを使用してモーダルが表示されサイズが確定した後にCanvasの解像度を設定
+        setTimeout(() => {
+          const rect = canvas.parentElement.getBoundingClientRect();
+          // 余白などを考慮してサイズ設定
+          canvas.width = canvas.clientWidth;
+          canvas.height = canvas.clientHeight;
+          
+          ctx.strokeStyle = '#1e3a8a'; // 濃い青色
+          ctx.lineWidth = 3;
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          
+          // 白背景で塗りつぶす
+          ctx.fillStyle = "#fefce8"; // yellow-50
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }, 50);
+      }
+
+      // タッチとマウス両方のイベントに対応
+      canvas.addEventListener('pointerdown', startDrawing);
+      canvas.addEventListener('pointermove', draw);
+      canvas.addEventListener('pointerup', stopDrawing);
+      canvas.addEventListener('pointerout', stopDrawing);
+      canvas.addEventListener('pointercancel', stopDrawing);
+
+      // スクロール防止
+      canvas.addEventListener('touchstart', (e) => e.preventDefault(), { passive: false });
+
+      function startDrawing(e) {
+        isDrawing = true;
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX || e.touches?.[0].clientX) - rect.left;
+        const y = (e.clientY || e.touches?.[0].clientY) - rect.top;
+        ctx.beginPath();
+        ctx.moveTo(x, y);
+        e.preventDefault();
+      }
+
+      function draw(e) {
+        if (!isDrawing) return;
+        const rect = canvas.getBoundingClientRect();
+        const x = (e.clientX || e.touches?.[0].clientX) - rect.left;
+        const y = (e.clientY || e.touches?.[0].clientY) - rect.top;
+        
+        ctx.lineTo(x, y);
+        ctx.stroke();
+        e.preventDefault();
+      }
+
+      function stopDrawing() {
+        isDrawing = false;
+        ctx.closePath();
+      }
+
+      document.getElementById('btn-close-canvas').addEventListener('click', () => {
+        canvasModal.classList.add('hidden');
+      });
+
+      document.getElementById('btn-clear-canvas').addEventListener('click', () => {
+        if(confirm("メモをすべて消去しますか？")) {
+          ctx.fillStyle = "#fefce8";
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+      });
+
+      document.getElementById('btn-save-canvas').addEventListener('click', () => {
+        // Base64画像データを取得してストレージに保存する処理を想定
+        const dataURL = canvas.toDataURL('image/png');
+        const todayStr = appState.currentDate.toISOString().split('T')[0];
+        
+        if (!appState.allData[todayStr]) appState.allData[todayStr] = {};
+        appState.allData[todayStr].memo = dataURL;
+        saveData();
+        
+        alert('メモを保存しました');
+        canvasModal.classList.add('hidden');
+      });
+
+      // === 初期化処理 ===
+      renderView();
+    });
+  </script>
+</body>
+</html>
