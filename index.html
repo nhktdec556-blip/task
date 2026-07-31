@@ -70,6 +70,19 @@
     技術科 授業数: <span id="tech-class-count" class="font-bold text-blue-600">0</span> コマ
   </footer>
 
+  <!-- 予定の追加・編集モーダル -->
+  <div id="event-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6 flex flex-col">
+      <h2 class="text-xl font-bold mb-4 border-b pb-2" id="event-modal-title">予定の編集</h2>
+      <input type="text" id="event-input" class="w-full border-gray-300 rounded p-3 mb-4 bg-gray-50 focus:bg-white outline-none ring-2 ring-blue-500 text-gray-800" placeholder="例: 14:00 教科部会">
+      <input type="hidden" id="event-index">
+      <div class="flex justify-end space-x-2">
+        <button id="btn-cancel-event" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded text-gray-700 font-semibold transition-colors">キャンセル</button>
+        <button id="btn-save-event" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-semibold shadow transition-colors">保存</button>
+      </div>
+    </div>
+  </div>
+
   <!-- スキャンモーダル -->
   <div id="scan-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
     <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 flex flex-col max-h-full">
@@ -158,8 +171,8 @@
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
           appState.dayData = docSnap.data();
+          if(!appState.dayData.events) appState.dayData.events = []; // 初期化保証
         } else {
-          // Default data
           appState.dayData = { timetableType: '通常', events: [], memo: null };
         }
         renderView();
@@ -222,9 +235,26 @@
 
     function renderDayView() {
       const dateColor = (appState.dayData.timetableType !== '通常') ? 'text-red-600 border-red-600' : 'text-gray-800 border-gray-300';
+      
+      // 予定リストの生成（編集・削除ボタン付き）
       let eventsHtml = appState.dayData.events.length > 0 
-        ? appState.dayData.events.map(e => `<li class="p-2 bg-blue-50 rounded border border-blue-100 mb-2">${e.text || e}</li>`).join('') 
-        : '<p class="text-gray-500 italic">予定はありません</p>';
+        ? appState.dayData.events.map((e, idx) => `
+            <li class="p-3 bg-blue-50 rounded border border-blue-100 mb-2 flex justify-between items-center group">
+              <span class="flex-1 text-blue-900">${e.text || e}</span>
+              <div class="space-x-1 flex-shrink-0">
+                <button data-action="edit" data-index="${idx}" class="text-blue-500 hover:bg-blue-200 px-2 py-1 rounded transition-colors text-xs font-bold">編集</button>
+                <button data-action="delete" data-index="${idx}" class="text-red-500 hover:bg-red-200 px-2 py-1 rounded transition-colors text-xs font-bold">削除</button>
+              </div>
+            </li>
+          `).join('') 
+        : '<p class="text-gray-500 italic mb-2">予定はありません</p>';
+
+      // 追加ボタンをリストの最後に配置
+      eventsHtml += `
+        <button id="btn-add-event" class="w-full mt-2 py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 hover:text-blue-500 transition-colors font-semibold flex items-center justify-center">
+          <span class="mr-1">＋</span> 新しい予定を追加
+        </button>
+      `;
 
       viewContainer.innerHTML = `
         <div class="p-4 h-full flex flex-col">
@@ -237,13 +267,79 @@
           </div>
           <div class="flex-1 overflow-auto">
             <h3 class="font-bold text-gray-600 mb-2">本日の予定</h3>
-            <ul>${eventsHtml}</ul>
-            ${appState.dayData.memo ? `<h3 class="font-bold text-gray-600 mt-4 mb-2">保存されたメモ</h3><img src="${appState.dayData.memo}" class="border rounded bg-yellow-50 w-full max-w-sm" />` : ''}
+            <ul class="mb-6">${eventsHtml}</ul>
+            ${appState.dayData.memo ? `<h3 class="font-bold text-gray-600 mt-4 mb-2">保存されたメモ</h3><img src="${appState.dayData.memo}" class="border rounded bg-yellow-50 w-full max-w-sm shadow-sm" />` : ''}
           </div>
         </div>
       `;
+      
       document.getElementById('btn-open-memo').addEventListener('click', openCanvasModal);
     }
+
+    // イベントの編集・削除・追加のイベントリスナー (イベントデリゲーション)
+    viewContainer.addEventListener('click', async (e) => {
+      if (appState.currentView !== 'day') return;
+
+      const editBtn = e.target.closest('button[data-action="edit"]');
+      const delBtn = e.target.closest('button[data-action="delete"]');
+      const addBtn = e.target.closest('#btn-add-event');
+
+      if (editBtn) {
+        const idx = parseInt(editBtn.dataset.index);
+        openEventModal(idx);
+      } else if (delBtn) {
+        const idx = parseInt(delBtn.dataset.index);
+        if (confirm("この予定を削除しますか？")) {
+          appState.dayData.events.splice(idx, 1);
+          await saveCurrentDayData();
+          renderView();
+        }
+      } else if (addBtn) {
+        openEventModal(-1);
+      }
+    });
+
+    // === イベント追加・編集モーダルの制御 ===
+    const eventModal = document.getElementById('event-modal');
+    const eventInput = document.getElementById('event-input');
+    const eventIndexInput = document.getElementById('event-index');
+    const eventModalTitle = document.getElementById('event-modal-title');
+
+    function openEventModal(index) {
+      if (index >= 0) {
+        eventModalTitle.textContent = '予定の編集';
+        const ev = appState.dayData.events[index];
+        eventInput.value = ev.text || ev;
+        eventIndexInput.value = index;
+      } else {
+        eventModalTitle.textContent = '予定の追加';
+        eventInput.value = '';
+        eventIndexInput.value = -1;
+      }
+      eventModal.classList.remove('hidden');
+      setTimeout(() => eventInput.focus(), 100);
+    }
+
+    document.getElementById('btn-cancel-event').addEventListener('click', () => {
+      eventModal.classList.add('hidden');
+    });
+
+    document.getElementById('btn-save-event').addEventListener('click', async () => {
+      const val = eventInput.value.trim();
+      if (!val) {
+        alert("予定を入力してください");
+        return;
+      }
+      const idx = parseInt(eventIndexInput.value);
+      if (idx >= 0) {
+        appState.dayData.events[idx] = val; // 更新
+      } else {
+        appState.dayData.events.push(val); // 新規追加
+      }
+      await saveCurrentDayData(); // Firebaseへ保存
+      renderView(); // 画面を再描画
+      eventModal.classList.add('hidden');
+    });
 
     function renderClassMatrix() {
       footerStats.classList.remove('hidden');
