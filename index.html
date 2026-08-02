@@ -1,3 +1,21 @@
+複数の端末（スマホやPCなど）のどこから開いても自分だけのデータを読み書きできるように、「ログイン画面（メールアドレス＆パスワード認証）」を追加した完全版コードを作成しました。
+
+これまでの「匿名ログイン」を廃止し、アカウントを作成・ログインしたユーザーごとにデータを紐付けてFirestoreに保存する仕組みになっています。
+
+ヘッダーの右上には「ログアウト」ボタンも追加しています。以下のコードをコピーして動作を確認してください。
+
+### 【重要】実行前のFirebase側の準備
+
+このコードを動かす前に、Firebaseコンソールで以下の設定が必要です。
+
+1. Firebaseコンソールの左メニューから **「Authentication（認証）」** を開く。
+2. **「始める」** をクリックし、ログインプロバイダとして **「メール/パスワード」** を選択して **「有効にする」** に設定し、保存してください。
+
+---
+
+### 💻 デジタル教師手帳（ログイン機能搭載版）
+
+```html
 <!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -39,21 +57,50 @@
     ::-webkit-scrollbar { display: none; }
   </style>
 </head>
-<body class="bg-gray-100 text-gray-800 font-sans h-screen flex flex-col overflow-hidden">
+<body class="bg-gray-100 text-gray-800 font-sans h-screen flex flex-col overflow-hidden relative">
+
+  <!-- ログイン・新規登録画面 -->
+  <div id="login-screen" class="fixed inset-0 bg-gray-800 z-[100] flex items-center justify-center">
+    <div class="bg-white p-8 rounded-xl shadow-2xl w-full max-w-sm mx-4">
+      <div class="text-center mb-6">
+        <h2 class="text-2xl font-bold text-gray-800">📖 デジタル教師手帳</h2>
+        <p class="text-sm text-gray-500 mt-2">アカウントにログインして同期</p>
+      </div>
+      
+      <div id="auth-error" class="hidden mb-4 p-3 bg-red-100 text-red-700 text-sm rounded border border-red-200"></div>
+
+      <div class="space-y-4">
+        <div>
+          <label class="block text-sm font-semibold text-gray-600 mb-1">メールアドレス</label>
+          <input type="email" id="auth-email" class="w-full border border-gray-300 p-2 rounded bg-gray-50 focus:bg-white outline-none focus:ring-2 focus:ring-blue-500" placeholder="teacher@example.com">
+        </div>
+        <div>
+          <label class="block text-sm font-semibold text-gray-600 mb-1">パスワード</label>
+          <input type="password" id="auth-pass" class="w-full border border-gray-300 p-2 rounded bg-gray-50 focus:bg-white outline-none focus:ring-2 focus:ring-blue-500" placeholder="6文字以上">
+        </div>
+        <div class="pt-2 space-y-3">
+          <button id="btn-login" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2.5 rounded shadow transition-colors">ログイン</button>
+          <button id="btn-signup" class="w-full bg-green-600 hover:bg-green-700 text-white font-bold py-2.5 rounded shadow transition-colors">新規アカウント登録</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- ヘッダー -->
   <header class="bg-gray-800 text-white p-3 flex justify-between items-center shadow-md z-20">
-    <h1 class="text-lg font-bold truncate flex-shrink-0 mr-2">📖 デジタル教師手帳</h1>
+    <h1 class="text-lg font-bold truncate flex-shrink-0 mr-2">📖 手帳</h1>
     <nav class="flex space-x-1 bg-gray-700 rounded-lg p-1 text-sm overflow-x-auto flex-1 justify-center hide-scrollbar" id="view-tabs">
-      <button data-view="month" class="tab-btn px-2 py-1 md:px-3 rounded-md bg-white text-gray-800 font-bold whitespace-nowrap">月</button>
+      <button data-view="month" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">月</button>
       <button data-view="week" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">週</button>
-      <button data-view="day" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">日</button>
+      <button data-view="day" class="tab-btn px-2 py-1 md:px-3 rounded-md bg-white text-gray-800 font-bold whitespace-nowrap">日</button>
       <button data-view="class-matrix" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">週授業</button>
-      <button data-view="agenda" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">一覧</button>
     </nav>
-    <div class="flex items-center ml-2">
-      <button id="btn-scan" class="bg-blue-600 hover:bg-blue-500 p-1 md:px-3 md:py-1 rounded text-sm flex items-center shadow whitespace-nowrap">
-        <span class="mr-1">📸</span> <span class="hidden md:inline">スキャン</span>
+    <div class="flex items-center ml-2 space-x-2">
+      <button id="btn-scan" class="bg-blue-600 hover:bg-blue-500 p-1 md:px-2 rounded text-sm flex items-center shadow whitespace-nowrap" title="週報スキャン">
+        📸
+      </button>
+      <button id="btn-logout" class="bg-gray-600 hover:bg-gray-500 p-1 md:px-2 rounded text-sm flex items-center shadow whitespace-nowrap" title="ログアウト">
+        🚪
       </button>
     </div>
   </header>
@@ -61,7 +108,7 @@
   <!-- メインコンテンツ -->
   <main id="swipe-container" class="flex-1 overflow-hidden relative p-2 touch-pan-y">
     <div id="view-container" class="bg-white h-full rounded-xl shadow-lg border border-gray-200 overflow-y-auto transition-transform duration-300">
-      <div class="flex h-full items-center justify-center text-gray-400">システム初期化中...</div>
+      <div class="flex h-full items-center justify-center text-gray-400">データを読み込み中...</div>
     </div>
   </main>
 
@@ -120,7 +167,7 @@
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
     import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
-    import { getAuth, signInAnonymously } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
+    import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
 
     // Firebase Configuration
     const firebaseConfig = {
@@ -139,7 +186,7 @@
 
     // App State
     let appState = {
-      currentView: 'month',
+      currentView: 'day', // 最初は日ビューを開く
       currentDate: new Date(),
       currentUserId: null,
       dayData: { timetableType: '通常', events: [], memo: null }
@@ -147,17 +194,64 @@
 
     const viewContainer = document.getElementById('view-container');
     const footerStats = document.getElementById('footer-stats');
+    const loginScreen = document.getElementById('login-screen');
+    const authError = document.getElementById('auth-error');
 
-    // Initialize Auth and Load Data
-    signInAnonymously(auth).then((userCredential) => {
-      appState.currentUserId = userCredential.user.uid;
-      loadDataForCurrentDate();
-    }).catch((error) => {
-      console.error("Auth Error:", error);
-      viewContainer.innerHTML = `<div class="flex h-full items-center justify-center text-red-500">認証エラーが発生しました</div>`;
+    // === 認証 (Authentication) 制御 ===
+    
+    // ログイン状態の監視
+    onAuthStateChanged(auth, (user) => {
+      if (user) {
+        // ログイン成功
+        appState.currentUserId = user.uid;
+        loginScreen.classList.add('hidden');
+        loadDataForCurrentDate();
+      } else {
+        // ログアウト状態
+        appState.currentUserId = null;
+        loginScreen.classList.remove('hidden');
+      }
     });
 
-    // Firestore Data Functions
+    function showAuthError(message) {
+      authError.textContent = message;
+      authError.classList.remove('hidden');
+    }
+
+    // ログインボタン処理
+    document.getElementById('btn-login').addEventListener('click', async () => {
+      const email = document.getElementById('auth-email').value;
+      const pass = document.getElementById('auth-pass').value;
+      if (!email || !pass) return showAuthError("メールアドレスとパスワードを入力してください。");
+      
+      try {
+        await signInWithEmailAndPassword(auth, email, pass);
+      } catch (error) {
+        showAuthError("ログイン失敗: " + error.message);
+      }
+    });
+
+    // 新規登録ボタン処理
+    document.getElementById('btn-signup').addEventListener('click', async () => {
+      const email = document.getElementById('auth-email').value;
+      const pass = document.getElementById('auth-pass').value;
+      if (!email || !pass) return showAuthError("メールアドレスとパスワードを入力してください。");
+      
+      try {
+        await createUserWithEmailAndPassword(auth, email, pass);
+      } catch (error) {
+        showAuthError("登録失敗: " + error.message);
+      }
+    });
+
+    // ログアウトボタン処理
+    document.getElementById('btn-logout').addEventListener('click', () => {
+      if (confirm("ログアウトしますか？")) {
+        signOut(auth);
+      }
+    });
+
+    // === Firestore Data Functions ===
     function getTodayStr() {
       const d = appState.currentDate;
       return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -166,12 +260,13 @@
     async function loadDataForCurrentDate() {
       if (!appState.currentUserId) return;
       const dateStr = getTodayStr();
+      viewContainer.innerHTML = `<div class="flex h-full items-center justify-center text-gray-400">読み込み中...</div>`;
       try {
         const docRef = doc(db, "users", appState.currentUserId, "planner_data", dateStr);
         const docSnap = await getDoc(docRef);
         if (docSnap.exists()) {
           appState.dayData = docSnap.data();
-          if(!appState.dayData.events) appState.dayData.events = []; // 初期化保証
+          if(!appState.dayData.events) appState.dayData.events = [];
         } else {
           appState.dayData = { timetableType: '通常', events: [], memo: null };
         }
@@ -192,7 +287,7 @@
       }
     }
 
-    // View Switching
+    // === ビューの切り替え処理 ===
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         appState.currentView = e.target.dataset.view;
@@ -216,7 +311,6 @@
         case 'week': viewContainer.innerHTML = `<div class="p-4"><h2 class="font-bold">週間ビュー</h2></div>`; break;
         case 'day': renderDayView(); break;
         case 'class-matrix': renderClassMatrix(); break;
-        case 'agenda': viewContainer.innerHTML = `<div class="p-4"><h2 class="font-bold">一覧ビュー</h2></div>`; break;
       }
       
       if (animationClass) {
@@ -225,7 +319,7 @@
     }
 
     function renderMonthView() {
-      let html = `<div class="h-full flex flex-col"><div class="p-3 bg-gray-50 border-b font-bold">${appState.currentDate.getFullYear()}年 ${appState.currentDate.getMonth() + 1}月</div><div class="flex-1 grid grid-cols-7 gap-px bg-gray-200 border-b">`;
+      let html = `<div class="h-full flex flex-col"><div class="p-3 bg-gray-50 border-b font-bold text-center">${appState.currentDate.getFullYear()}年 ${appState.currentDate.getMonth() + 1}月</div><div class="flex-1 grid grid-cols-7 gap-px bg-gray-200 border-b">`;
       ['日', '月', '火', '水', '木', '金', '土'].forEach(d => html += `<div class="bg-gray-100 text-center py-1 text-xs font-semibold">${d}</div>`);
       for (let i = 1; i <= 35; i++) {
         html += `<div class="bg-white p-1 h-20 md:h-24 hover:bg-gray-50 flex flex-col border-b border-r"><span class="text-right text-xs text-gray-500">${i<=31?i:''}</span></div>`;
@@ -236,22 +330,20 @@
     function renderDayView() {
       const dateColor = (appState.dayData.timetableType !== '通常') ? 'text-red-600 border-red-600' : 'text-gray-800 border-gray-300';
       
-      // 予定リストの生成（編集・削除ボタン付き）
       let eventsHtml = appState.dayData.events.length > 0 
         ? appState.dayData.events.map((e, idx) => `
-            <li class="p-3 bg-blue-50 rounded border border-blue-100 mb-2 flex justify-between items-center group">
+            <li class="p-3 bg-blue-50 rounded border border-blue-100 mb-2 flex justify-between items-center group shadow-sm">
               <span class="flex-1 text-blue-900">${e.text || e}</span>
               <div class="space-x-1 flex-shrink-0">
-                <button data-action="edit" data-index="${idx}" class="text-blue-500 hover:bg-blue-200 px-2 py-1 rounded transition-colors text-xs font-bold">編集</button>
-                <button data-action="delete" data-index="${idx}" class="text-red-500 hover:bg-red-200 px-2 py-1 rounded transition-colors text-xs font-bold">削除</button>
+                <button data-action="edit" data-index="${idx}" class="text-blue-500 hover:bg-blue-200 px-2 py-1 rounded transition-colors text-xs font-bold border border-blue-200 bg-white">編集</button>
+                <button data-action="delete" data-index="${idx}" class="text-red-500 hover:bg-red-200 px-2 py-1 rounded transition-colors text-xs font-bold border border-red-200 bg-white">削除</button>
               </div>
             </li>
           `).join('') 
         : '<p class="text-gray-500 italic mb-2">予定はありません</p>';
 
-      // 追加ボタンをリストの最後に配置
       eventsHtml += `
-        <button id="btn-add-event" class="w-full mt-2 py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 hover:text-blue-500 transition-colors font-semibold flex items-center justify-center">
+        <button id="btn-add-event" class="w-full mt-2 py-3 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 hover:text-blue-500 transition-colors font-semibold flex items-center justify-center">
           <span class="mr-1">＋</span> 新しい予定を追加
         </button>
       `;
@@ -261,14 +353,14 @@
           <div class="flex justify-between items-center mb-4 border-b pb-2">
             <div>
               <h2 class="text-xl font-bold">${getTodayStr()}</h2>
-              <span class="text-sm border px-2 py-0.5 rounded font-bold ${dateColor}">${appState.dayData.timetableType}日課</span>
+              <span class="text-sm border px-2 py-0.5 rounded font-bold mt-1 inline-block ${dateColor}">${appState.dayData.timetableType}日課</span>
             </div>
-            <button id="btn-open-memo" class="bg-yellow-100 text-yellow-800 px-3 py-1 rounded shadow text-sm font-bold">✍️ メモ</button>
+            <button id="btn-open-memo" class="bg-yellow-100 text-yellow-800 px-3 py-2 rounded-lg shadow text-sm font-bold flex items-center">✍️ メモ</button>
           </div>
-          <div class="flex-1 overflow-auto">
-            <h3 class="font-bold text-gray-600 mb-2">本日の予定</h3>
+          <div class="flex-1 overflow-auto pb-6">
+            <h3 class="font-bold text-gray-600 mb-3 border-l-4 border-blue-500 pl-2">本日の予定</h3>
             <ul class="mb-6">${eventsHtml}</ul>
-            ${appState.dayData.memo ? `<h3 class="font-bold text-gray-600 mt-4 mb-2">保存されたメモ</h3><img src="${appState.dayData.memo}" class="border rounded bg-yellow-50 w-full max-w-sm shadow-sm" />` : ''}
+            ${appState.dayData.memo ? `<h3 class="font-bold text-gray-600 mt-6 mb-2 border-l-4 border-yellow-500 pl-2">手書きメモ</h3><img src="${appState.dayData.memo}" class="border rounded-lg bg-yellow-50 w-full shadow-sm" />` : ''}
           </div>
         </div>
       `;
@@ -276,7 +368,7 @@
       document.getElementById('btn-open-memo').addEventListener('click', openCanvasModal);
     }
 
-    // イベントの編集・削除・追加のイベントリスナー (イベントデリゲーション)
+    // === 予定の追加・編集・削除 ===
     viewContainer.addEventListener('click', async (e) => {
       if (appState.currentView !== 'day') return;
 
@@ -299,7 +391,6 @@
       }
     });
 
-    // === イベント追加・編集モーダルの制御 ===
     const eventModal = document.getElementById('event-modal');
     const eventInput = document.getElementById('event-input');
     const eventIndexInput = document.getElementById('event-index');
@@ -332,12 +423,12 @@
       }
       const idx = parseInt(eventIndexInput.value);
       if (idx >= 0) {
-        appState.dayData.events[idx] = val; // 更新
+        appState.dayData.events[idx] = val;
       } else {
-        appState.dayData.events.push(val); // 新規追加
+        appState.dayData.events.push(val);
       }
-      await saveCurrentDayData(); // Firebaseへ保存
-      renderView(); // 画面を再描画
+      await saveCurrentDayData();
+      renderView();
       eventModal.classList.add('hidden');
     });
 
@@ -348,10 +439,10 @@
         html += `<tr><td class="text-center font-bold bg-gray-50">${i}</td><td/><td/><td class="bg-blue-50 text-blue-800">2年1組 技術</td><td/><td/></tr>`;
       }
       viewContainer.innerHTML = html + `</tbody></table>`;
-      document.getElementById('tech-class-count').textContent = "1"; // ダミーカウント
+      document.getElementById('tech-class-count').textContent = "1";
     }
 
-    // Swipe Logic
+    // === スワイプ操作 ===
     const swipeZone = document.getElementById('swipe-container');
     let touchStartX = 0, touchStartY = 0;
     swipeZone.addEventListener('touchstart', e => { touchStartX = e.touches[0].screenX; touchStartY = e.touches[0].screenY; }, {passive: true});
@@ -359,13 +450,13 @@
       const diffX = e.changedTouches[0].screenX - touchStartX;
       if (Math.abs(diffX) > 60 && Math.abs(e.changedTouches[0].screenY - touchStartY) < 40) {
         const d = appState.currentDate;
-        d.setDate(d.getDate() + (diffX < 0 ? 1 : -1)); // 簡略化: 1日単位で移動
+        d.setDate(d.getDate() + (diffX < 0 ? 1 : -1));
         viewContainer.innerHTML = `<div class="flex h-full items-center justify-center text-gray-400">読み込み中...</div>`;
         loadDataForCurrentDate().then(() => renderView(diffX < 0 ? 'slide-enter-right' : 'slide-enter-left'));
       }
     }, {passive: true});
 
-    // Gemini Mock Logic
+    // === スキャンモック ===
     document.getElementById('btn-scan').addEventListener('click', () => {
       document.getElementById('scan-modal').classList.remove('hidden');
       document.getElementById('scan-result-area').classList.add('hidden');
@@ -386,10 +477,6 @@
             <span class="bg-red-100 text-red-700 text-xs px-2 py-1 rounded mr-2">学校</span>
             <input type="text" value="全校集会（短縮日課）" class="w-full bg-transparent outline-none scan-val" />
           </li>
-          <li class="bg-white p-2 rounded shadow-sm border text-sm flex items-center mt-2">
-            <span class="bg-blue-100 text-blue-700 text-xs px-2 py-1 rounded mr-2">岡本</span>
-            <input type="text" value="14:00 教科部会" class="w-full bg-transparent outline-none scan-val" />
-          </li>
         `;
         document.getElementById('scan-result-area').classList.remove('hidden');
         document.getElementById('btn-apply-scan').classList.remove('hidden');
@@ -398,15 +485,14 @@
 
     document.getElementById('btn-apply-scan').addEventListener('click', async () => {
       const inputs = document.querySelectorAll('.scan-val');
-      appState.dayData.timetableType = '短縮'; // モックによる判定
+      appState.dayData.timetableType = '短縮';
       inputs.forEach(input => appState.dayData.events.push(input.value));
-      
       await saveCurrentDayData();
       renderView();
       document.getElementById('scan-modal').classList.add('hidden');
     });
 
-    // Canvas Logic
+    // === キャンバス (メモ機能) ===
     const canvasModal = document.getElementById('canvas-modal');
     const canvas = document.getElementById('memo-canvas');
     const ctx = canvas.getContext('2d');
@@ -445,3 +531,5 @@
   </script>
 </body>
 </html>
+
+```
