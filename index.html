@@ -48,9 +48,7 @@
         <h2 class="text-2xl font-bold text-gray-800">📖 デジタル教師手帳</h2>
         <p class="text-sm text-gray-500 mt-2">アカウントにログインして同期</p>
       </div>
-      
       <div id="auth-error" class="hidden mb-4 p-3 bg-red-100 text-red-700 text-sm rounded border border-red-200"></div>
-
       <div class="space-y-4">
         <div>
           <label class="block text-sm font-semibold text-gray-600 mb-1">メールアドレス</label>
@@ -78,12 +76,8 @@
       <button data-view="class-matrix" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">週授業</button>
     </nav>
     <div class="flex items-center ml-2 space-x-2">
-      <button id="btn-scan" class="bg-blue-600 hover:bg-blue-500 p-1 md:px-2 rounded text-sm flex items-center shadow whitespace-nowrap" title="週報スキャン">
-        📸
-      </button>
-      <button id="btn-logout" class="bg-gray-600 hover:bg-gray-500 p-1 md:px-2 rounded text-sm flex items-center shadow whitespace-nowrap" title="ログアウト">
-        🚪
-      </button>
+      <button id="btn-scan" class="bg-blue-600 hover:bg-blue-500 p-1 md:px-2 rounded text-sm flex items-center shadow whitespace-nowrap" title="週報スキャン">📸</button>
+      <button id="btn-logout" class="bg-gray-600 hover:bg-gray-500 p-1 md:px-2 rounded text-sm flex items-center shadow whitespace-nowrap" title="ログアウト">🚪</button>
     </div>
   </header>
 
@@ -116,11 +110,11 @@
   <div id="scan-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
     <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 flex flex-col max-h-full">
       <h2 class="text-xl font-bold mb-4 border-b pb-2">週報・月報から予定を追加</h2>
-      <p class="text-xs text-gray-500 mb-4">画像をアップロードすると、Gemini AIが自動で各日付に予定を振り分けて抽出します。</p>
+      <p class="text-xs text-gray-500 mb-4">PDFや画像をアップロードすると、Gemini 1.5 Proが予定を解析して抽出します。</p>
       <input type="file" id="file-upload" accept="image/*,application/pdf" class="mb-4 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700" />
       <div id="scan-progress" class="hidden flex-col items-center justify-center py-6">
         <div class="ripple-loader mb-4"></div>
-        <p class="text-sm text-gray-600 font-semibold loading-dots">予定を解析・抽出中</p>
+        <p class="text-sm text-gray-600 font-semibold loading-dots">AIがPDF/画像を解析中</p>
       </div>
       <div id="scan-result-area" class="hidden flex-1 overflow-y-auto mb-4 border rounded p-2 bg-gray-50 min-h-[150px]">
         <ul id="extracted-events-list" class="space-y-3"></ul>
@@ -281,11 +275,10 @@
       }
     }
 
-    // --- 月間ビュー ---
     function renderMonthView() {
       const year = appState.currentDate.getFullYear();
       const month = appState.currentDate.getMonth();
-      const firstDay = new Date(year, month, 1).getDay(); // 0(Sun) - 6(Sat)
+      const firstDay = new Date(year, month, 1).getDay();
       const daysInMonth = new Date(year, month + 1, 0).getDate();
 
       let html = `
@@ -299,15 +292,12 @@
       
       ['日', '月', '火', '水', '木', '金', '土'].forEach(d => html += `<div class="bg-gray-100 text-center py-2 text-xs font-semibold text-gray-700">${d}</div>`);
       
-      // 空白セル（前月）
       for (let i = 0; i < firstDay; i++) {
         html += `<div class="bg-gray-50 p-1 h-20 md:h-24"></div>`;
       }
-      // 日付セル
       for (let i = 1; i <= daysInMonth; i++) {
         const isToday = (i === new Date().getDate() && month === new Date().getMonth() && year === new Date().getFullYear());
         const dateStyle = isToday ? "bg-blue-600 text-white rounded-full w-6 h-6 inline-flex items-center justify-center" : "text-gray-700";
-        
         html += `
           <div data-action="go-day" data-day="${i}" class="bg-white p-1 h-20 md:h-24 flex flex-col border-b border-r cursor-pointer hover:bg-blue-50 transition-colors">
             <div class="text-right text-xs"><span class="${dateStyle} font-semibold">${i}</span></div>
@@ -315,21 +305,17 @@
         `;
       }
       
-      // 末尾の空白セル
       const totalCells = firstDay + daysInMonth;
       const trailingCells = totalCells % 7 === 0 ? 0 : 7 - (totalCells % 7);
       for (let i = 0; i < trailingCells; i++) {
         html += `<div class="bg-gray-50 p-1 h-20 md:h-24"></div>`;
       }
-
       viewContainer.innerHTML = html + `</div>`;
     }
 
-    // --- 週間ビュー ---
     function renderWeekView() {
-      // 選択中の日付が含まれる週の日曜日を基準にする
       const d = new Date(appState.currentDate);
-      d.setDate(d.getDate() - d.getDay()); // 日曜日へ
+      d.setDate(d.getDate() - d.getDay());
       
       const startStr = `${d.getMonth() + 1}/${d.getDate()}`;
       const endDate = new Date(d);
@@ -350,7 +336,6 @@
         const currentLoopDate = new Date(d);
         currentLoopDate.setDate(d.getDate() + i);
         const dayNum = currentLoopDate.getDate();
-        
         const isToday = (currentLoopDate.toDateString() === new Date().toDateString());
         const bgClass = isToday ? "bg-blue-50" : "bg-white";
 
@@ -361,17 +346,14 @@
               <div class="text-lg font-bold text-gray-800">${dayNum}</div>
             </div>
             <div class="flex-1 text-sm text-gray-600">
-               <!-- Firestoreから一括取得する場合はここに予定を描画 -->
                <div class="text-xs text-gray-400 mt-1">タップして詳細を表示</div>
             </div>
           </div>
         `;
       }
-
       viewContainer.innerHTML = html + `</div>`;
     }
 
-    // --- 日ビュー ---
     function renderDayView() {
       const dateColor = (appState.dayData.timetableType !== '通常') ? 'text-red-600 border-red-600 bg-red-50' : 'text-gray-800 border-gray-300';
       const dateStrDisplay = `${appState.currentDate.getFullYear()}年${appState.currentDate.getMonth() + 1}月${appState.currentDate.getDate()}日`;
@@ -405,14 +387,11 @@
             <span class="text-sm border px-3 py-1 rounded-full font-bold shadow-sm inline-block ${dateColor}">${appState.dayData.timetableType}日課</span>
             <button id="btn-open-memo" class="bg-yellow-100 text-yellow-800 px-4 py-2 rounded-lg shadow font-bold flex items-center hover:bg-yellow-200 transition-colors">✍️ 手書きメモ</button>
           </div>
-          
           <h3 class="font-bold text-gray-700 mb-3 border-l-4 border-blue-500 pl-2">本日の予定</h3>
           <ul class="mb-6">${eventsHtml}</ul>
-          
           ${appState.dayData.memo ? `<h3 class="font-bold text-gray-700 mt-6 mb-3 border-l-4 border-yellow-500 pl-2">保存されたメモ</h3><img src="${appState.dayData.memo}" class="border rounded-lg bg-yellow-50 w-full shadow-sm" />` : ''}
         </div>
       `;
-      
       document.getElementById('btn-open-memo').addEventListener('click', openCanvasModal);
     }
 
@@ -428,7 +407,6 @@
 
     // === ナビゲーション・追加・編集イベントハンドラ ===
     viewContainer.addEventListener('click', async (e) => {
-      // ナビゲーション操作
       const action = e.target.closest('button[data-action]') || e.target.closest('div[data-action]');
       if (action) {
         const type = action.dataset.action;
@@ -454,27 +432,22 @@
           appState.currentDate.setDate(appState.currentDate.getDate() + 1);
           await loadDataForCurrentDate();
         } else if (type === 'go-day') {
-          // 月・週ビューから特定の日付へジャンプ
           const day = parseInt(action.dataset.day);
           const month = action.dataset.month ? parseInt(action.dataset.month) : appState.currentDate.getMonth();
           appState.currentDate.setMonth(month);
           appState.currentDate.setDate(day);
-          
-          appState.currentView = 'day'; // タブのUIも日ビューに切り替える処理
+          appState.currentView = 'day'; 
           document.querySelectorAll('.tab-btn').forEach(t => t.classList.replace('bg-white', 'text-gray-300'));
           document.querySelectorAll('.tab-btn').forEach(t => t.classList.remove('text-gray-800', 'font-bold'));
           document.querySelector('[data-view="day"]').classList.add('bg-white', 'text-gray-800', 'font-bold');
-          
           await loadDataForCurrentDate();
         }
       }
 
-      // 日ビューの予定操作
       if (appState.currentView === 'day') {
         const editBtn = e.target.closest('button[data-action="edit"]');
         const delBtn = e.target.closest('button[data-action="delete"]');
         const addBtn = e.target.closest('#btn-add-event');
-
         if (editBtn) {
           openEventModal(parseInt(editBtn.dataset.index));
         } else if (delBtn) {
@@ -490,7 +463,6 @@
       }
     });
 
-    // モーダルの処理
     const eventModal = document.getElementById('event-modal');
     const eventInput = document.getElementById('event-input');
     const eventIndexInput = document.getElementById('event-index');
@@ -510,74 +482,141 @@
       eventModal.classList.remove('hidden');
       setTimeout(() => eventInput.focus(), 100);
     }
-
     document.getElementById('btn-cancel-event').addEventListener('click', () => eventModal.classList.add('hidden'));
-
     document.getElementById('btn-save-event').addEventListener('click', async () => {
       const val = eventInput.value.trim();
       if (!val) return alert("予定を入力してください");
       const idx = parseInt(eventIndexInput.value);
-      if (idx >= 0) {
-        appState.dayData.events[idx] = val;
-      } else {
-        appState.dayData.events.push(val);
-      }
+      if (idx >= 0) appState.dayData.events[idx] = val;
+      else appState.dayData.events.push(val);
       await saveCurrentDayData();
       renderView();
       eventModal.classList.add('hidden');
     });
 
-    // === スキャン機能 (複数日への一括反映モック) ===
+    // === Gemini API (1.5 Pro) 解析・連携機能 ===
     document.getElementById('btn-scan').addEventListener('click', () => {
       document.getElementById('scan-modal').classList.remove('hidden');
       document.getElementById('scan-result-area').classList.add('hidden');
       document.getElementById('btn-apply-scan').classList.add('hidden');
     });
-    
     document.getElementById('btn-cancel-scan').addEventListener('click', () => document.getElementById('scan-modal').classList.add('hidden'));
 
-    document.getElementById('file-upload').addEventListener('change', (e) => {
-      if (!e.target.files[0]) return;
-      document.getElementById('scan-progress').classList.remove('hidden');
-      
-      // Gemini APIの抽出結果（モック：複数の日付に跨るデータを想定）
-      setTimeout(() => {
-        document.getElementById('scan-progress').classList.add('hidden');
-        const list = document.getElementById('extracted-events-list');
-        
-        // 当日と明日の日付を生成
-        const todayStr = formatDateStr(appState.currentDate);
-        const tomorrow = new Date(appState.currentDate);
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        const tomorrowStr = formatDateStr(tomorrow);
+    // ファイルをBase64に変換する関数
+    function fileToBase64(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = () => resolve(reader.result.split(',')[1]);
+        reader.onerror = error => reject(error);
+      });
+    }
 
-        list.innerHTML = `
-          <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${todayStr}">
-            <div class="flex justify-between items-center mb-1">
-              <span class="font-bold text-blue-700 text-sm">${todayStr} (本日)</span>
-              <span class="bg-red-100 text-red-700 text-xs px-2 py-0.5 rounded">学校</span>
-            </div>
-            <input type="text" value="全校集会（短縮日課）" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
-          </li>
-          <li class="bg-white p-3 rounded shadow border flex flex-col scan-item mt-2" data-date="${tomorrowStr}">
-            <div class="flex justify-between items-center mb-1">
-              <span class="font-bold text-blue-700 text-sm">${tomorrowStr} (明日)</span>
-              <span class="bg-blue-100 text-blue-700 text-xs px-2 py-0.5 rounded">教員</span>
-            </div>
-            <input type="text" value="14:00 教科部会" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
-          </li>
-        `;
+    // Gemini API 呼び出し関数
+    async function callGeminiAPI(base64Data, mimeType) {
+      // ⚠️ ここに取得したGeminiのAPIキーを入力してください
+      const apiKey = "YOUR_API_KEY_HERE"; 
+      
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${apiKey}`;
+      const prompt = `
+        あなたは優秀な中学校のスケジュールアシスタントです。
+        アップロードされたファイルは、中学校の週報または月間予定表（PDFまたは画像）です。
+        このファイルから以下の情報を抽出し、必ず指定されたJSON配列フォーマットで出力してください。
+
+        【抽出する対象】
+        1. 学校全体の予定や特別な日課（短縮日課、テスト、行事など）
+        2. 「石川」先生に関連する予定（会議、出張、部活動など）
+        3. 時間割の変更情報（例: 月1を火2へ変更、授業のカット等）
+
+        【重要なルール】
+        ・推測で予定を作らないでください。
+        ・ファイルに記載されていない日付のデータは出力しないでください。
+        ・Markdownのバッククォート（\`\`\`json など）は絶対に含めず、純粋なJSON配列のみを出力してください。
+
+        【出力フォーマット】
+        [
+          {"date": "YYYY-MM-DD", "type": "学校", "text": "全校集会（短縮日課）"},
+          {"date": "YYYY-MM-DD", "type": "石川", "text": "14:00 教科部会"},
+          {"date": "YYYY-MM-DD", "type": "変更", "text": "3限の授業カット"}
+        ]
+      `;
+
+      const requestBody = {
+        contents: [{
+          parts: [
+            { text: prompt },
+            { inline_data: { mime_type: mimeType, data: base64Data } }
+          ]
+        }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          temperature: 0.1
+        }
+      };
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`API error: ${response.status} - ${errText}`);
+      }
+
+      const data = await response.json();
+      return JSON.parse(data.candidates[0].content.parts[0].text);
+    }
+
+    document.getElementById('file-upload').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      document.getElementById('scan-progress').classList.remove('hidden');
+      document.getElementById('scan-result-area').classList.add('hidden');
+      document.getElementById('btn-apply-scan').classList.add('hidden');
+
+      try {
+        const base64Data = await fileToBase64(file);
+        
+        // 🚨 APIキーを設定するまではエラーになるため、設定後に動作します。
+        const extractedEvents = await callGeminiAPI(base64Data, file.type);
+        
+        document.getElementById('scan-progress').classList.add('hidden');
+        
+        const list = document.getElementById('extracted-events-list');
+        list.innerHTML = extractedEvents.map(ev => {
+          let badgeClass = "bg-gray-100 text-gray-700";
+          if (ev.type === "学校") badgeClass = "bg-red-100 text-red-700";
+          if (ev.type === "石川") badgeClass = "bg-blue-100 text-blue-700";
+          if (ev.type === "変更") badgeClass = "bg-yellow-100 text-yellow-700";
+
+          return `
+            <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${ev.date}">
+              <div class="flex justify-between items-center mb-1">
+                <span class="font-bold text-blue-700 text-sm">${ev.date}</span>
+                <span class="${badgeClass} text-xs px-2 py-0.5 rounded">${ev.type}</span>
+              </div>
+              <input type="text" value="${ev.text}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
+            </li>
+          `;
+        }).join('');
+        
         document.getElementById('scan-result-area').classList.remove('hidden');
         document.getElementById('btn-apply-scan').classList.remove('hidden');
-      }, 2000);
+
+      } catch (error) {
+        console.error(error);
+        document.getElementById('scan-progress').classList.add('hidden');
+        alert("ファイルの解析に失敗しました。GeminiのAPIキーが正しく設定されているか確認してください。\n詳細: " + error.message);
+      }
     });
 
-    // 一括反映処理 (複数のドキュメントに対してsetDocを実行)
+    // 一括反映処理
     document.getElementById('btn-apply-scan').addEventListener('click', async () => {
       const items = document.querySelectorAll('.scan-item');
-      const updates = {}; // { 'YYYY-MM-DD': ['予定1', '予定2'] }
-
-      // 抽出結果を日付ごとにまとめる
+      const updates = {};
       items.forEach(item => {
         const dateStr = item.dataset.date;
         const val = item.querySelector('.scan-val').value;
@@ -585,25 +624,17 @@
         updates[dateStr].push(val);
       });
 
-      // Firebaseへの一括書き込み処理
       for (const [dateStr, newEvents] of Object.entries(updates)) {
         const docRef = doc(db, "users", appState.currentUserId, "planner_data", dateStr);
         const docSnap = await getDoc(docRef);
-        
         let data = docSnap.exists() ? docSnap.data() : { timetableType: '通常', events: [], memo: null };
         if(!data.events) data.events = [];
-        
-        // 新しい予定を追加
         data.events.push(...newEvents);
-        
-        // 短縮などのキーワードが含まれていれば日課を変更する簡易ロジック
         if (newEvents.some(e => e.includes('短縮'))) data.timetableType = '短縮';
-
         await setDoc(docRef, data);
       }
-
       alert("複数の予定を一括でカレンダーに反映しました！");
-      await loadDataForCurrentDate(); // 現在の画面を再読み込み
+      await loadDataForCurrentDate();
       document.getElementById('scan-modal').classList.add('hidden');
     });
 
@@ -612,7 +643,6 @@
     const canvas = document.getElementById('memo-canvas');
     const ctx = canvas.getContext('2d');
     let isDrawing = false;
-
     function openCanvasModal() {
       document.getElementById('memo-date-title').textContent = `${appState.currentDate.getMonth() + 1}月${appState.currentDate.getDate()}日のメモ`;
       canvasModal.classList.remove('hidden');
@@ -622,27 +652,22 @@
         ctx.fillStyle = "#fefce8"; ctx.fillRect(0, 0, canvas.width, canvas.height);
       }, 50);
     }
-
     function getPos(e) {
       const rect = canvas.getBoundingClientRect();
       return { x: (e.clientX || e.touches?.[0].clientX) - rect.left, y: (e.clientY || e.touches?.[0].clientY) - rect.top };
     }
-
     canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
     canvas.addEventListener('pointerdown', e => { isDrawing = true; const pos = getPos(e); ctx.beginPath(); ctx.moveTo(pos.x, pos.y); });
     canvas.addEventListener('pointermove', e => { if (!isDrawing) return; const pos = getPos(e); ctx.lineTo(pos.x, pos.y); ctx.stroke(); });
     ['pointerup', 'pointerout', 'pointercancel'].forEach(evt => canvas.addEventListener(evt, () => isDrawing = false));
-
     document.getElementById('btn-close-canvas').addEventListener('click', () => canvasModal.classList.add('hidden'));
     document.getElementById('btn-clear-canvas').addEventListener('click', () => { ctx.fillRect(0, 0, canvas.width, canvas.height); });
-    
     document.getElementById('btn-save-canvas').addEventListener('click', async () => {
       appState.dayData.memo = canvas.toDataURL('image/png');
       await saveCurrentDayData();
       renderView();
       canvasModal.classList.add('hidden');
     });
-
   </script>
 </body>
 </html>
