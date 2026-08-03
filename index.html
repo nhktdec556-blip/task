@@ -41,7 +41,21 @@
 </head>
 <body class="bg-gray-100 text-gray-800 font-sans h-screen flex flex-col overflow-hidden relative">
 
-  <!-- ログイン・新規登録画面 -->
+  <!-- トースト通知コンテナ -->
+  <div id="toast-container" class="fixed top-4 left-1/2 transform -translate-x-1/2 z-[300] flex flex-col gap-2 pointer-events-none"></div>
+
+  <!-- カスタム確認ダイアログ -->
+  <div id="custom-confirm" class="hidden fixed inset-0 bg-black/50 z-[200] flex items-center justify-center p-4">
+    <div class="bg-white p-6 rounded-xl shadow-2xl w-full max-w-sm">
+      <p id="confirm-message" class="text-gray-800 mb-6 font-semibold"></p>
+      <div class="flex justify-end space-x-3">
+        <button id="btn-confirm-cancel" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded font-semibold transition-colors">キャンセル</button>
+        <button id="btn-confirm-ok" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-semibold shadow transition-colors">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ログイン画面 -->
   <div id="login-screen" class="fixed inset-0 bg-gray-800 z-[100] flex items-center justify-center">
     <div class="bg-white p-8 rounded-xl shadow-2xl w-full max-w-sm mx-4">
       <div class="text-center mb-6">
@@ -66,7 +80,6 @@
     </div>
   </div>
 
-  <!-- ヘッダー -->
   <header class="bg-gray-800 text-white p-3 flex justify-between items-center shadow-md z-20">
     <h1 class="text-lg font-bold truncate flex-shrink-0 mr-2">📖 手帳</h1>
     <nav class="flex space-x-1 bg-gray-700 rounded-lg p-1 text-sm overflow-x-auto flex-1 justify-center hide-scrollbar" id="view-tabs">
@@ -81,14 +94,12 @@
     </div>
   </header>
 
-  <!-- メインコンテンツ -->
   <main id="swipe-container" class="flex-1 overflow-hidden relative p-2 touch-pan-y">
     <div id="view-container" class="bg-white h-full rounded-xl shadow-lg border border-gray-200 overflow-y-auto transition-transform duration-300">
       <div class="flex h-full items-center justify-center text-gray-400">データを読み込み中...</div>
     </div>
   </main>
 
-  <!-- フッター -->
   <footer id="footer-stats" class="bg-white border-t px-4 py-2 text-sm text-gray-600 hidden">
     技術科 授業数: <span id="tech-class-count" class="font-bold text-blue-600">0</span> コマ
   </footer>
@@ -110,15 +121,32 @@
   <div id="scan-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
     <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 flex flex-col max-h-full">
       <h2 class="text-xl font-bold mb-4 border-b pb-2">週報・月報から予定を追加</h2>
-      <p class="text-xs text-gray-500 mb-4">PDFや画像をアップロードすると、Gemini 1.5 Proが予定を解析して抽出します。</p>
-      <input type="file" id="file-upload" accept="image/*,application/pdf" class="mb-4 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700" />
+      
+      <!-- APIキー設定エリア -->
+      <div id="api-key-setup" class="mb-4 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+        <p class="text-xs text-yellow-800 mb-2 font-semibold">⚠️ 初回設定: Gemini APIキーを入力してください</p>
+        <div class="flex space-x-2">
+          <input type="password" id="input-api-key" class="flex-1 text-sm border border-gray-300 p-2 rounded outline-none focus:ring-2 focus:ring-yellow-500" placeholder="AIzaSy...">
+          <button id="btn-save-key" class="bg-yellow-600 hover:bg-yellow-700 text-white px-3 py-2 rounded text-sm font-bold transition-colors shadow">保存</button>
+        </div>
+        <p class="text-[10px] text-yellow-600 mt-2">※キーはブラウザにのみ安全に保存されます。</p>
+      </div>
+
+      <!-- ファイルアップロードエリア -->
+      <div id="upload-section" class="hidden">
+        <p class="text-xs text-gray-500 mb-4">PDFや画像をアップロードすると、Gemini 1.5 Proが予定を解析して抽出します。</p>
+        <input type="file" id="file-upload" accept="image/*,application/pdf" class="mb-4 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 transition-colors" />
+      </div>
+
       <div id="scan-progress" class="hidden flex-col items-center justify-center py-6">
         <div class="ripple-loader mb-4"></div>
         <p class="text-sm text-gray-600 font-semibold loading-dots">AIがPDF/画像を解析中</p>
       </div>
+      
       <div id="scan-result-area" class="hidden flex-1 overflow-y-auto mb-4 border rounded p-2 bg-gray-50 min-h-[150px]">
         <ul id="extracted-events-list" class="space-y-3"></ul>
       </div>
+      
       <div class="flex justify-end space-x-2 mt-auto">
         <button id="btn-cancel-scan" class="px-4 py-2 bg-gray-200 rounded text-gray-700 font-semibold">キャンセル</button>
         <button id="btn-apply-scan" class="hidden px-4 py-2 bg-blue-600 text-white rounded font-semibold shadow">一括反映</button>
@@ -146,7 +174,6 @@
     import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
     import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
 
-    // Firebase Configuration
     const firebaseConfig = {
       apiKey: "AIzaSyBTnLD4voIU8O_YMl0ssOcUX5K7CC0y_Ew",
       authDomain: "task-6c861.firebaseapp.com",
@@ -161,7 +188,6 @@
     const db = getFirestore(app);
     const auth = getAuth(app);
 
-    // App State
     let appState = {
       currentView: 'day', 
       currentDate: new Date(),
@@ -174,12 +200,47 @@
     const loginScreen = document.getElementById('login-screen');
     const authError = document.getElementById('auth-error');
 
-    // === ユーティリティ関数 ===
+    // === Custom UI Helpers (No alert/confirm) ===
+    function showToast(message, type = 'success') {
+      const toast = document.createElement('div');
+      const bgColor = type === 'error' ? 'bg-red-600' : 'bg-green-600';
+      toast.className = `${bgColor} text-white px-4 py-3 rounded shadow-lg text-sm transition-opacity duration-300 opacity-0 font-semibold z-[300]`;
+      toast.textContent = message;
+      document.getElementById('toast-container').appendChild(toast);
+      
+      requestAnimationFrame(() => toast.classList.remove('opacity-0'));
+      setTimeout(() => {
+        toast.classList.add('opacity-0');
+        setTimeout(() => toast.remove(), 300);
+      }, 3000);
+    }
+
+    function showConfirm(message, onConfirm) {
+      const modal = document.getElementById('custom-confirm');
+      document.getElementById('confirm-message').textContent = message;
+      modal.classList.remove('hidden');
+      
+      const btnOk = document.getElementById('btn-confirm-ok');
+      const btnCancel = document.getElementById('btn-confirm-cancel');
+      
+      // Remove old listeners by cloning
+      const newBtnOk = btnOk.cloneNode(true);
+      const newBtnCancel = btnCancel.cloneNode(true);
+      btnOk.parentNode.replaceChild(newBtnOk, btnOk);
+      btnCancel.parentNode.replaceChild(newBtnCancel, btnCancel);
+      
+      newBtnOk.addEventListener('click', () => {
+        modal.classList.add('hidden');
+        onConfirm();
+      });
+      newBtnCancel.addEventListener('click', () => modal.classList.add('hidden'));
+    }
+
     function formatDateStr(dateObj) {
       return `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
     }
 
-    // === 認証 (Authentication) ===
+    // === Authentication ===
     onAuthStateChanged(auth, (user) => {
       if (user) {
         appState.currentUserId = user.uid;
@@ -211,7 +272,7 @@
     });
 
     document.getElementById('btn-logout').addEventListener('click', () => {
-      if (confirm("ログアウトしますか？")) signOut(auth);
+      showConfirm("ログアウトしますか？", () => signOut(auth));
     });
 
     // === Firestore Data Functions ===
@@ -229,7 +290,7 @@
         }
         renderView();
       } catch (e) {
-        console.error("Error loading data:", e);
+        showToast("データの読み込みに失敗しました", 'error');
       }
     }
 
@@ -240,11 +301,11 @@
         const docRef = doc(db, "users", appState.currentUserId, "planner_data", dateStr);
         await setDoc(docRef, appState.dayData);
       } catch (e) {
-        console.error("Error saving data:", e);
+        showToast("保存に失敗しました", 'error');
       }
     }
 
-    // === ビュー描画制御 ===
+    // === Rendering ===
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
         appState.currentView = e.target.dataset.view;
@@ -275,6 +336,7 @@
       }
     }
 
+    // --- 月間ビュー ---
     function renderMonthView() {
       const year = appState.currentDate.getFullYear();
       const month = appState.currentDate.getMonth();
@@ -292,9 +354,7 @@
       
       ['日', '月', '火', '水', '木', '金', '土'].forEach(d => html += `<div class="bg-gray-100 text-center py-2 text-xs font-semibold text-gray-700">${d}</div>`);
       
-      for (let i = 0; i < firstDay; i++) {
-        html += `<div class="bg-gray-50 p-1 h-20 md:h-24"></div>`;
-      }
+      for (let i = 0; i < firstDay; i++) html += `<div class="bg-gray-50 p-1 h-20 md:h-24"></div>`;
       for (let i = 1; i <= daysInMonth; i++) {
         const isToday = (i === new Date().getDate() && month === new Date().getMonth() && year === new Date().getFullYear());
         const dateStyle = isToday ? "bg-blue-600 text-white rounded-full w-6 h-6 inline-flex items-center justify-center" : "text-gray-700";
@@ -307,16 +367,14 @@
       
       const totalCells = firstDay + daysInMonth;
       const trailingCells = totalCells % 7 === 0 ? 0 : 7 - (totalCells % 7);
-      for (let i = 0; i < trailingCells; i++) {
-        html += `<div class="bg-gray-50 p-1 h-20 md:h-24"></div>`;
-      }
+      for (let i = 0; i < trailingCells; i++) html += `<div class="bg-gray-50 p-1 h-20 md:h-24"></div>`;
       viewContainer.innerHTML = html + `</div>`;
     }
 
+    // --- 週間ビュー ---
     function renderWeekView() {
       const d = new Date(appState.currentDate);
       d.setDate(d.getDate() - d.getDay());
-      
       const startStr = `${d.getMonth() + 1}/${d.getDate()}`;
       const endDate = new Date(d);
       endDate.setDate(d.getDate() + 6);
@@ -354,6 +412,7 @@
       viewContainer.innerHTML = html + `</div>`;
     }
 
+    // --- 日ビュー ---
     function renderDayView() {
       const dateColor = (appState.dayData.timetableType !== '通常') ? 'text-red-600 border-red-600 bg-red-50' : 'text-gray-800 border-gray-300';
       const dateStrDisplay = `${appState.currentDate.getFullYear()}年${appState.currentDate.getMonth() + 1}月${appState.currentDate.getDate()}日`;
@@ -405,7 +464,7 @@
       document.getElementById('tech-class-count').textContent = "1";
     }
 
-    // === ナビゲーション・追加・編集イベントハンドラ ===
+    // === STREAMING_CHUNK: Interactions and Modal handlers ===
     viewContainer.addEventListener('click', async (e) => {
       const action = e.target.closest('button[data-action]') || e.target.closest('div[data-action]');
       if (action) {
@@ -452,11 +511,12 @@
           openEventModal(parseInt(editBtn.dataset.index));
         } else if (delBtn) {
           const idx = parseInt(delBtn.dataset.index);
-          if (confirm("この予定を削除しますか？")) {
+          showConfirm("この予定を削除しますか？", async () => {
             appState.dayData.events.splice(idx, 1);
             await saveCurrentDayData();
             renderView();
-          }
+            showToast("予定を削除しました");
+          });
         } else if (addBtn) {
           openEventModal(-1);
         }
@@ -483,26 +543,55 @@
       setTimeout(() => eventInput.focus(), 100);
     }
     document.getElementById('btn-cancel-event').addEventListener('click', () => eventModal.classList.add('hidden'));
+    
     document.getElementById('btn-save-event').addEventListener('click', async () => {
       const val = eventInput.value.trim();
-      if (!val) return alert("予定を入力してください");
+      if (!val) {
+        showToast("予定を入力してください", 'error');
+        return;
+      }
       const idx = parseInt(eventIndexInput.value);
       if (idx >= 0) appState.dayData.events[idx] = val;
       else appState.dayData.events.push(val);
+      
       await saveCurrentDayData();
       renderView();
       eventModal.classList.add('hidden');
+      showToast("予定を保存しました");
     });
 
-    // === Gemini API (1.5 Pro) 解析・連携機能 ===
+    // === STREAMING_CHUNK: Gemini API Settings and Analysis ===
+    function checkApiKey() {
+      const key = localStorage.getItem('gemini_api_key');
+      if (key) {
+        document.getElementById('api-key-setup').classList.add('hidden');
+        document.getElementById('upload-section').classList.remove('hidden');
+      } else {
+        document.getElementById('api-key-setup').classList.remove('hidden');
+        document.getElementById('upload-section').classList.add('hidden');
+      }
+    }
+
     document.getElementById('btn-scan').addEventListener('click', () => {
+      checkApiKey();
       document.getElementById('scan-modal').classList.remove('hidden');
       document.getElementById('scan-result-area').classList.add('hidden');
       document.getElementById('btn-apply-scan').classList.add('hidden');
     });
+    
     document.getElementById('btn-cancel-scan').addEventListener('click', () => document.getElementById('scan-modal').classList.add('hidden'));
+    
+    document.getElementById('btn-save-key').addEventListener('click', () => {
+      const val = document.getElementById('input-api-key').value.trim();
+      if (val) {
+        localStorage.setItem('gemini_api_key', val);
+        checkApiKey();
+        showToast("APIキーを保存しました。ファイルを選択できます。");
+      } else {
+        showToast("APIキーを入力してください", "error");
+      }
+    });
 
-    // ファイルをBase64に変換する関数
     function fileToBase64(file) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -512,10 +601,9 @@
       });
     }
 
-    // Gemini API 呼び出し関数
     async function callGeminiAPI(base64Data, mimeType) {
-      // ⚠️ ここに取得したGeminiのAPIキーを入力してください
-      const apiKey = "YOUR_API_KEY_HERE"; 
+      const apiKey = localStorage.getItem('gemini_api_key');
+      if (!apiKey) throw new Error("APIキーが設定されていません");
       
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${apiKey}`;
       const prompt = `
@@ -579,8 +667,6 @@
 
       try {
         const base64Data = await fileToBase64(file);
-        
-        // 🚨 APIキーを設定するまではエラーになるため、設定後に動作します。
         const extractedEvents = await callGeminiAPI(base64Data, file.type);
         
         document.getElementById('scan-progress').classList.add('hidden');
@@ -609,11 +695,10 @@
       } catch (error) {
         console.error(error);
         document.getElementById('scan-progress').classList.add('hidden');
-        alert("ファイルの解析に失敗しました。GeminiのAPIキーが正しく設定されているか確認してください。\n詳細: " + error.message);
+        showToast("解析に失敗しました。APIキーを確認してください。", "error");
       }
     });
 
-    // 一括反映処理
     document.getElementById('btn-apply-scan').addEventListener('click', async () => {
       const items = document.querySelectorAll('.scan-item');
       const updates = {};
@@ -633,16 +718,18 @@
         if (newEvents.some(e => e.includes('短縮'))) data.timetableType = '短縮';
         await setDoc(docRef, data);
       }
-      alert("複数の予定を一括でカレンダーに反映しました！");
+      
+      showToast("予定を一括で反映しました");
       await loadDataForCurrentDate();
       document.getElementById('scan-modal').classList.add('hidden');
     });
 
-    // === キャンバス (メモ機能) ===
+    // === STREAMING_CHUNK: Canvas Setup for Memo ===
     const canvasModal = document.getElementById('canvas-modal');
     const canvas = document.getElementById('memo-canvas');
     const ctx = canvas.getContext('2d');
     let isDrawing = false;
+    
     function openCanvasModal() {
       document.getElementById('memo-date-title').textContent = `${appState.currentDate.getMonth() + 1}月${appState.currentDate.getDate()}日のメモ`;
       canvasModal.classList.remove('hidden');
@@ -656,17 +743,25 @@
       const rect = canvas.getBoundingClientRect();
       return { x: (e.clientX || e.touches?.[0].clientX) - rect.left, y: (e.clientY || e.touches?.[0].clientY) - rect.top };
     }
+    
     canvas.addEventListener('touchstart', e => e.preventDefault(), { passive: false });
     canvas.addEventListener('pointerdown', e => { isDrawing = true; const pos = getPos(e); ctx.beginPath(); ctx.moveTo(pos.x, pos.y); });
     canvas.addEventListener('pointermove', e => { if (!isDrawing) return; const pos = getPos(e); ctx.lineTo(pos.x, pos.y); ctx.stroke(); });
     ['pointerup', 'pointerout', 'pointercancel'].forEach(evt => canvas.addEventListener(evt, () => isDrawing = false));
+    
     document.getElementById('btn-close-canvas').addEventListener('click', () => canvasModal.classList.add('hidden'));
-    document.getElementById('btn-clear-canvas').addEventListener('click', () => { ctx.fillRect(0, 0, canvas.width, canvas.height); });
+    document.getElementById('btn-clear-canvas').addEventListener('click', () => {
+      showConfirm("メモを消去しますか？", () => {
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      });
+    });
+    
     document.getElementById('btn-save-canvas').addEventListener('click', async () => {
       appState.dayData.memo = canvas.toDataURL('image/png');
       await saveCurrentDayData();
       renderView();
       canvasModal.classList.add('hidden');
+      showToast("メモを保存しました");
     });
   </script>
 </body>
