@@ -122,7 +122,7 @@
   <div id="scan-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
     <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 flex flex-col max-h-full">
       <h2 class="text-xl font-bold mb-4 border-b pb-2">週報・月報から予定を追加</h2>
-      <p class="text-xs text-gray-500 mb-4">月報（月間行事予定表）や週報のPDF・画像をアップロードすると、Gemini AIが校内行事予定や「石川」先生の予定などを解析して抽出します。抽出された校内行事予定は月・週・日・年間予定すべてに反映されます。</p>
+      <p class="text-xs text-gray-500 mb-4">月報（月間行事予定表）や週報のPDF・画像をアップロードすると、Gemini AIが校内行事予定や「石川」先生の予定などを解析して抽出します。抽出後の一覧で不要な項目は「✕」で個別に除外してから反映できます。</p>
       <input type="file" id="file-upload" accept="image/*,application/pdf" class="mb-4 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700" />
       
       <!-- エラー表示エリア -->
@@ -847,6 +847,14 @@
       document.getElementById('file-upload').value = '';
     });
 
+    // 抽出結果の中から不要な項目を個別に取り除けるようにする（一括反映に含めたくない項目用）
+    document.getElementById('extracted-events-list').addEventListener('click', (e) => {
+      const removeBtn = e.target.closest('.scan-item-remove');
+      if (removeBtn) {
+        removeBtn.closest('.scan-item').remove();
+      }
+    });
+
     function fileToBase64(file) {
       return new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -1048,12 +1056,17 @@
             if (ev.type === "時間割") badgeClass = "bg-indigo-100 text-indigo-700";
             if (ev.type === "振替") badgeClass = "bg-purple-100 text-purple-700";
 
+            const removeBtn = `<button type="button" class="scan-item-remove text-gray-400 hover:text-red-600 font-bold px-1 flex-shrink-0" title="この項目は反映しない">✕</button>`;
+
             if (ev.type === "時間割") {
               return `
                 <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-day="${ev.day}" data-period="${ev.period}" data-type="${ev.type}">
                   <div class="flex justify-between items-center mb-1">
                     <span class="font-bold text-indigo-700 text-sm">${ev.day}曜 ${ev.period}限</span>
-                    <span class="${badgeClass} text-xs px-2 py-0.5 rounded">週授業</span>
+                    <div class="flex items-center space-x-1">
+                      <span class="${badgeClass} text-xs px-2 py-0.5 rounded">週授業</span>
+                      ${removeBtn}
+                    </div>
                   </div>
                   <input type="text" value="${ev.text}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
                 </li>
@@ -1065,7 +1078,10 @@
                 <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${ev.date}" data-grade="${ev.grade}" data-period="${ev.period}" data-type="${ev.type}">
                   <div class="flex justify-between items-center mb-1">
                     <span class="font-bold text-purple-700 text-sm">${ev.date} ${ev.grade}学年 ${ev.period}限</span>
-                    <span class="${badgeClass} text-xs px-2 py-0.5 rounded">振替</span>
+                    <div class="flex items-center space-x-1">
+                      <span class="${badgeClass} text-xs px-2 py-0.5 rounded">振替</span>
+                      ${removeBtn}
+                    </div>
                   </div>
                   <input type="text" value="${ev.value}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
                 </li>
@@ -1076,7 +1092,10 @@
               <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${ev.date}" data-type="${ev.type}">
                 <div class="flex justify-between items-center mb-1">
                   <span class="font-bold text-blue-700 text-sm">${ev.date}</span>
-                  <span class="${badgeClass} text-xs px-2 py-0.5 rounded">${ev.type === "学校" ? "行事" : ev.type}</span>
+                  <div class="flex items-center space-x-1">
+                    <span class="${badgeClass} text-xs px-2 py-0.5 rounded">${ev.type === "学校" ? "行事" : ev.type}</span>
+                    ${removeBtn}
+                  </div>
                 </div>
                 <input type="text" value="${ev.text}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
               </li>
