@@ -121,7 +121,7 @@
   <div id="scan-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
     <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 flex flex-col max-h-full">
       <h2 class="text-xl font-bold mb-4 border-b pb-2">週報・月報から予定を追加</h2>
-      <p class="text-xs text-gray-500 mb-4">月報（月間行事予定表）や週報のPDF・画像をアップロードすると、Gemini 2.5 Proが校内行事予定や「石川」先生の予定などを解析して抽出します。抽出された校内行事予定は月・週・日・年間予定すべてに反映されます。</p>
+      <p class="text-xs text-gray-500 mb-4">月報（月間行事予定表）や週報のPDF・画像をアップロードすると、Gemini 2.5 Flashが校内行事予定や「石川」先生の予定などを解析して抽出します。抽出された校内行事予定は月・週・日・年間予定すべてに反映されます。</p>
       <input type="file" id="file-upload" accept="image/*,application/pdf" class="mb-4 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700" />
       
       <!-- エラー表示エリア -->
@@ -581,7 +581,7 @@
       document.getElementById('event-modal').classList.add('hidden');
     });
 
-    // === Gemini API (2.5 Pro) 解析・連携機能 ===
+    // === Gemini API (2.5 Flash) 解析・連携機能 ===
     document.getElementById('btn-scan').addEventListener('click', () => {
       document.getElementById('scan-modal').classList.remove('hidden');
       document.getElementById('scan-result-area').classList.add('hidden');
@@ -611,7 +611,7 @@
         throw new Error("APIキーが設定されていません。右上の「⚙️設定」ボタンからキーを登録してください。");
       }
 
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${apiKey}`;
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
       const prompt = `
         あなたは優秀な中学校のスケジュールアシスタントです。
         アップロードされたファイルは、中学校の月報（月間行事予定表）または週報（PDFまたは画像）です。
@@ -670,6 +670,10 @@
         // 利用モデルがAPIキーの利用可能枠で提供終了・未対応の場合
         if (response.status === 404 && errText.includes("is not found for API version")) {
           throw new Error("現在使用しているAIモデルがこのAPIキーでは利用できません。Google AI Studioで有効なAPIキーを再発行し、設定から登録し直してください。");
+        }
+        // 無料枠の利用上限（クォータ）を超えた場合
+        if (response.status === 429 || errText.includes("RESOURCE_EXHAUSTED") || errText.includes("exceeded your current quota")) {
+          throw new Error("APIキーの利用上限（クォータ）に達しました。無料枠は1日あたりのリクエスト数や1分あたりの回数に制限があります。しばらく時間をおくか、Google AI Studioでプランや請求設定をご確認ください。");
         }
         throw new Error(`エラーが発生しました (${response.status}): ${errText}`);
       }
