@@ -142,6 +142,30 @@
     </div>
   </div>
 
+  <!-- 授業時数カウント専用：振替・特別スケジュール取り込みモーダル -->
+  <div id="swap-scan-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 flex flex-col max-h-full">
+      <h2 class="text-xl font-bold mb-4 border-b pb-2">月報から授業の振替を取り込む</h2>
+      <p class="text-xs text-gray-500 mb-4">月報の、学年・時限ごとに「火1」のような振替表記やテスト等が書かれたページのPDF・画像をアップロードしてください。授業時数カウントの計算にのみ使われます。抽出後の一覧で不要な項目は「✕」で個別に除外してから反映できます。</p>
+      <input type="file" id="swap-file-upload" accept="image/*,application/pdf" class="mb-4 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-purple-50 file:text-purple-700" />
+
+      <!-- エラー表示エリア -->
+      <div id="swap-scan-error" class="hidden mb-4 p-3 bg-red-100 text-red-700 text-sm rounded border border-red-200 break-words"></div>
+
+      <div id="swap-scan-progress" class="hidden flex-col items-center justify-center py-6">
+        <div class="ripple-loader mb-4"></div>
+        <p class="text-sm text-gray-600 font-semibold loading-dots">AIがPDF/画像を解析中</p>
+      </div>
+      <div id="swap-scan-result-area" class="hidden flex-1 overflow-y-auto mb-4 border rounded p-2 bg-gray-50 min-h-[150px]">
+        <ul id="swap-extracted-events-list" class="space-y-3"></ul>
+      </div>
+      <div class="flex justify-end space-x-2 mt-auto">
+        <button id="btn-cancel-swap-scan" class="px-4 py-2 bg-gray-200 rounded text-gray-700 font-semibold">キャンセル</button>
+        <button id="btn-apply-swap-scan" class="hidden px-4 py-2 bg-purple-600 text-white rounded font-semibold shadow">一括反映</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 手書きメモモーダル -->
   <div id="canvas-modal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center">
     <div class="bg-white rounded-lg p-2 w-[95%] h-[90%] flex flex-col">
@@ -374,6 +398,22 @@
         console.error("Error fetching period overrides range:", e);
       }
       return result;
+    }
+
+    // 日付ごとの授業振替・特別スケジュール（学年→時限→表記）をplanner_dataにマージ保存する。
+    // 授業時数カウント専用アップロードの反映処理から呼び出す。
+    async function applyPeriodOverrideUpdates(overridesByDate) {
+      for (const [dateStr, gradePeriods] of Object.entries(overridesByDate)) {
+        const docRef = doc(db, "users", appState.currentUserId, "planner_data", dateStr);
+        const docSnap = await getDoc(docRef);
+        let data = docSnap.exists() ? docSnap.data() : { timetableType: '通常', events: [], schoolEvents: [], memo: null, periodOverrides: {} };
+        if (!data.periodOverrides) data.periodOverrides = {};
+        // 学年・時限単位でマージし、既存の他学年・他時限の振替データを消さないようにする
+        Object.entries(gradePeriods).forEach(([grade, periods]) => {
+          data.periodOverrides[grade] = { ...(data.periodOverrides[grade] || {}), ...periods };
+        });
+        await setDoc(docRef, data);
+      }
     }
 
     // === 画面描画制御 ===
@@ -729,7 +769,12 @@
       const overridesMap = await fetchPeriodOverridesInRange(startStr, endStr);
       const { classCodes, counts } = computeLessonCounts(appState.weeklyTimetable || {}, months, overridesMap);
 
-      let html = `<div class="p-3 bg-gray-50 border-b"><div class="font-bold text-lg">授業時数カウント（社会科・今月〜3月）</div></div>`;
+      let html = `
+        <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
+          <div class="font-bold text-lg">授業時数カウント（社会科・今月〜3月）</div>
+          <button id="btn-open-swap-scan" class="bg-purple-600 hover:bg-purple-500 text-white text-xs px-3 py-1.5 rounded shadow font-bold whitespace-nowrap">📄 振替を取り込む</button>
+        </div>
+      `;
 
       if (classCodes.length === 0) {
         html += `<p class="text-gray-400 italic text-center py-10">時間割が登録されていません。「📸」ボタンから石川先生の時間割表を取り込んでください。</p>`;
@@ -762,6 +807,7 @@
       }
 
       viewContainer.innerHTML = html;
+      document.getElementById('btn-open-swap-scan').addEventListener('click', openSwapScanModal);
     }
 
     // === ナビゲーション & クリックイベント ===
@@ -906,14 +952,10 @@
       return modelId;
     }
 
-    async function callGeminiAPI(base64Data, mimeType) {
-      // ローカルストレージからAPIキーを取得
-      const apiKey = localStorage.getItem('gemini_api_key');
-      if (!apiKey) {
-        throw new Error("APIキーが設定されていません。右上の「⚙️設定」ボタンからキーを登録してください。");
-      }
-
-      const prompt = `
+    // 月報・週報から校内行事予定/個人予定/時間割変更/週間時間割を抽出するメインのプロンプト
+    // （日付ごとの授業振替・特別スケジュールは精度を上げるため、専用のアップロード機能側の
+    // プロンプトで別途処理する）
+    const MAIN_SCAN_PROMPT = `
         あなたは優秀な中学校のスケジュールアシスタントです。
         アップロードされたファイルは、中学校の月報（月間行事予定表）または週報（PDFまたは画像）です。
         月報は日付ごと・週ごとにマス目やカレンダー形式、あるいは表形式で校内行事予定が並んでいることが多く、レイアウトが崩れて見えても、日付と行事名の対応関係を丁寧に読み取ってください。
@@ -924,10 +966,6 @@
         2. 「石川」先生に関連する個人の予定（会議、出張、部活動など）
         3. 時間割の変更情報（例: 月1を火2へ変更、授業のカット等）
         4. 石川先生の週間授業時間割：ファイルに「先生名 石川」等と書かれた個人の週間時間割表（月〜金の曜日と1〜6限の組み合わせで、各コマに「3-4 社会」のような組・教科が書かれている表）がある場合、その組み合わせを1コマずつ抽出してください。この場合は日付(date)の代わりに、曜日を表す"day"（"月""火""水""木""金"のいずれか）と、限を表す"period"（1〜6の数値）を使い、"text"にはそのコマの内容（例: "3-4 社会"）を入れてください。
-        5. 授業の振替・特別スケジュール：月報の右端等に、学年（1・2・3など）と時限（1〜6限）ごとに、その実際の日付のその時限に何が行われるかを示す欄がある場合があります。セルの内容は主に次の2パターンです。
-           (a) 曜日+時限の組み合わせ（例:「火1」「水3」）：これは「その実際の日付のその時限は、指定された曜日（例: 火曜日）の通常時間割の同じ時限のコマに従って授業を行う（振替）」という意味です。
-           (b) テスト・学活・総合・道徳などの文言：その時限は通常の教科授業ではなく、記載された内容が行われる（＝通常の教科授業は行われない）という意味です。
-           この欄がある場合、日付・学年・時限ごとに、日付(date)の代わりに"grade"（学年を表す数字。例: "1"）と"period"（1〜6の数値）を使い、"value"にはそのセルの文言をそのまま（例: "火1"や"テスト"）入れて抽出してください。単なる学校行事名（始業式等）はこの種別ではなく1の「行事」として抽出してください。
 
         【重要なルール】
         ・推測で予定を作らないでください。
@@ -938,8 +976,38 @@
         ・出力トークンを節約するため、改行・インデント・余分な空白を一切入れず、必ず1行の圧縮されたJSON配列として出力してください。
 
         【出力フォーマット（実際は改行を入れず1行で出力すること）】
-        [{"date": "YYYY-MM-DD", "type": "行事", "text": "始業式（短縮日課）"}, {"date": "YYYY-MM-DD", "type": "石川", "text": "14:00 教科部会"}, {"date": "YYYY-MM-DD", "type": "変更", "text": "3限の授業カット"}, {"type": "時間割", "day": "月", "period": 1, "text": "3-4 社会"}, {"type": "振替", "date": "YYYY-MM-DD", "grade": "1", "period": 1, "value": "火1"}]
+        [{"date": "YYYY-MM-DD", "type": "行事", "text": "始業式（短縮日課）"}, {"date": "YYYY-MM-DD", "type": "石川", "text": "14:00 教科部会"}, {"date": "YYYY-MM-DD", "type": "変更", "text": "3限の授業カット"}, {"type": "時間割", "day": "月", "period": 1, "text": "3-4 社会"}]
       `;
+
+    // 授業時数カウント専用：日付ごとの授業振替・特別スケジュール（学年・時限単位）だけを
+    // 抽出することに特化したプロンプト。他の情報と混ぜないことで抽出精度を上げる。
+    const SWAP_SCAN_PROMPT = `
+        あなたは中学校の授業スケジュールデータ抽出の専門アシスタントです。
+        アップロードされたファイル（月報の一部、PDFまたは画像）には、各日付・各学年（1・2・3など）・各時限（1〜6限）について、その実際の日付のその時限に何が行われるかを示す表があります。
+
+        【セルの読み方】
+        (a) 曜日+時限の組み合わせ（例:「火1」「水3」）：これは「その実際の日付のその時限は、指定された曜日（例: 火曜日）の通常時間割の同じ時限の内容に従って授業を行う（振替）」という意味です。
+        (b) テスト・学活・総合・道徳などの文言：その時限は通常の教科授業ではなく、記載された内容が行われる（＝通常の教科授業は行われない）という意味です。
+
+        表に記載されている日付・学年・時限の組み合わせをすべて、必ず指定されたJSON配列フォーマットで出力してください。行事名や個人の予定など、この表以外の情報は抽出しないでください。
+
+        【重要なルール】
+        ・推測で値を作らないでください。
+        ・ファイルに記載されていない日付・学年・時限のデータは出力しないでください。
+        ・資料に年度・月の記載がある場合はそれをもとにYYYY-MM-DD形式の日付へ正しく変換してください。
+        ・Markdownのバッククォート（\`\`\`json など）は絶対に含めず、純粋なJSON配列のみを出力してください。
+        ・出力トークンを節約するため、改行・インデント・余分な空白を一切入れず、必ず1行の圧縮されたJSON配列として出力してください。
+
+        【出力フォーマット（実際は改行を入れず1行で出力すること）】
+        [{"date": "YYYY-MM-DD", "grade": "1", "period": 1, "value": "火1"}, {"date": "YYYY-MM-DD", "grade": "1", "period": 2, "value": "テスト"}]
+      `;
+
+    async function callGeminiAPI(base64Data, mimeType, prompt) {
+      // ローカルストレージからAPIキーを取得
+      const apiKey = localStorage.getItem('gemini_api_key');
+      if (!apiKey) {
+        throw new Error("APIキーが設定されていません。右上の「⚙️設定」ボタンからキーを登録してください。");
+      }
 
       const requestBody = {
         contents: [{
@@ -1040,7 +1108,7 @@
         const base64Data = await fileToBase64(file);
         
         // 🚨 取得したAPIキーを使って通信を開始
-        const extractedEvents = await callGeminiAPI(base64Data, file.type);
+        const extractedEvents = await callGeminiAPI(base64Data, file.type, MAIN_SCAN_PROMPT);
         
         progress.classList.add('hidden');
         
@@ -1054,7 +1122,6 @@
             if (ev.type === "石川") badgeClass = "bg-blue-100 text-blue-700";
             if (ev.type === "変更") badgeClass = "bg-yellow-100 text-yellow-700";
             if (ev.type === "時間割") badgeClass = "bg-indigo-100 text-indigo-700";
-            if (ev.type === "振替") badgeClass = "bg-purple-100 text-purple-700";
 
             const removeBtn = `<button type="button" class="scan-item-remove text-gray-400 hover:text-red-600 font-bold px-1 flex-shrink-0" title="この項目は反映しない">✕</button>`;
 
@@ -1069,21 +1136,6 @@
                     </div>
                   </div>
                   <input type="text" value="${ev.text}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
-                </li>
-              `;
-            }
-
-            if (ev.type === "振替") {
-              return `
-                <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${ev.date}" data-grade="${ev.grade}" data-period="${ev.period}" data-type="${ev.type}">
-                  <div class="flex justify-between items-center mb-1">
-                    <span class="font-bold text-purple-700 text-sm">${ev.date} ${ev.grade}学年 ${ev.period}限</span>
-                    <div class="flex items-center space-x-1">
-                      <span class="${badgeClass} text-xs px-2 py-0.5 rounded">振替</span>
-                      ${removeBtn}
-                    </div>
-                  </div>
-                  <input type="text" value="${ev.value}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
                 </li>
               `;
             }
@@ -1120,7 +1172,7 @@
 
     // 一括反映処理
     document.getElementById('btn-apply-scan').addEventListener('click', async () => {
-      const items = document.querySelectorAll('.scan-item');
+      const items = document.querySelectorAll('#extracted-events-list .scan-item');
       if (items.length === 0) return document.getElementById('scan-modal').classList.add('hidden');
 
       const updates = {};
@@ -1132,16 +1184,8 @@
           timetableUpdates[`${item.dataset.day}-${item.dataset.period}`] = val;
           return;
         }
-        if (type === '振替') {
-          const dateStr = item.dataset.date;
-          if (!updates[dateStr]) updates[dateStr] = { schoolEvents: [], events: [], periodOverrides: {} };
-          const grade = item.dataset.grade;
-          if (!updates[dateStr].periodOverrides[grade]) updates[dateStr].periodOverrides[grade] = {};
-          updates[dateStr].periodOverrides[grade][item.dataset.period] = val;
-          return;
-        }
         const dateStr = item.dataset.date;
-        if (!updates[dateStr]) updates[dateStr] = { schoolEvents: [], events: [], periodOverrides: {} };
+        if (!updates[dateStr]) updates[dateStr] = { schoolEvents: [], events: [] };
         if (type === '行事' || type === '学校') {
           updates[dateStr].schoolEvents.push(val);
         } else {
@@ -1152,18 +1196,13 @@
       for (const [dateStr, newData] of Object.entries(updates)) {
         const docRef = doc(db, "users", appState.currentUserId, "planner_data", dateStr);
         const docSnap = await getDoc(docRef);
-        let data = docSnap.exists() ? docSnap.data() : { timetableType: '通常', events: [], schoolEvents: [], memo: null, periodOverrides: {} };
+        let data = docSnap.exists() ? docSnap.data() : { timetableType: '通常', events: [], schoolEvents: [], memo: null };
         if(!data.events) data.events = [];
         if(!data.schoolEvents) data.schoolEvents = [];
-        if(!data.periodOverrides) data.periodOverrides = {};
         data.events.push(...newData.events);
         data.schoolEvents.push(...newData.schoolEvents);
         data.events = dedupeEvents(data.events);
         data.schoolEvents = dedupeEvents(data.schoolEvents);
-        // 学年・時限単位でマージし、既存の他学年・他時限の振替データを消さないようにする
-        Object.entries(newData.periodOverrides).forEach(([grade, periods]) => {
-          data.periodOverrides[grade] = { ...(data.periodOverrides[grade] || {}), ...periods };
-        });
         if ([...newData.events, ...newData.schoolEvents].some(e => e.includes('短縮'))) data.timetableType = '短縮';
         await setDoc(docRef, data);
       }
@@ -1173,10 +1212,97 @@
         await setDoc(timetableRef, timetableUpdates, { merge: true });
       }
 
-      alert("校内行事予定・予定を一括でカレンダーに反映しました！月・週・日・年間予定・週授業・時数カウントに反映されます。");
+      alert("校内行事予定・予定を一括でカレンダーに反映しました！月・週・日・年間予定・週授業に反映されます。");
       await loadDataForCurrentDate();
       document.getElementById('scan-modal').classList.add('hidden');
       document.getElementById('file-upload').value = ''; // 次回のためにリセット
+    });
+
+    // === 授業時数カウント専用：振替・特別スケジュール取り込み ===
+    function openSwapScanModal() {
+      document.getElementById('swap-scan-modal').classList.remove('hidden');
+      document.getElementById('swap-scan-result-area').classList.add('hidden');
+      document.getElementById('btn-apply-swap-scan').classList.add('hidden');
+      document.getElementById('swap-scan-error').classList.add('hidden');
+    }
+
+    document.getElementById('btn-cancel-swap-scan').addEventListener('click', () => {
+      document.getElementById('swap-scan-modal').classList.add('hidden');
+      document.getElementById('swap-file-upload').value = '';
+    });
+
+    document.getElementById('swap-extracted-events-list').addEventListener('click', (e) => {
+      const removeBtn = e.target.closest('.scan-item-remove');
+      if (removeBtn) {
+        removeBtn.closest('.scan-item').remove();
+      }
+    });
+
+    document.getElementById('swap-file-upload').addEventListener('change', async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const progress = document.getElementById('swap-scan-progress');
+      const errorArea = document.getElementById('swap-scan-error');
+
+      progress.classList.remove('hidden');
+      errorArea.classList.add('hidden');
+      document.getElementById('swap-scan-result-area').classList.add('hidden');
+      document.getElementById('btn-apply-swap-scan').classList.add('hidden');
+
+      try {
+        const base64Data = await fileToBase64(file);
+        const extractedSwaps = await callGeminiAPI(base64Data, file.type, SWAP_SCAN_PROMPT);
+
+        progress.classList.add('hidden');
+
+        const list = document.getElementById('swap-extracted-events-list');
+        if (extractedSwaps.length === 0) {
+          list.innerHTML = `<li class="text-gray-500 italic p-3 text-center">振替・特別スケジュールが見つかりませんでした</li>`;
+        } else {
+          list.innerHTML = extractedSwaps.map(ev => `
+            <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${ev.date}" data-grade="${ev.grade}" data-period="${ev.period}">
+              <div class="flex justify-between items-center mb-1">
+                <span class="font-bold text-purple-700 text-sm">${ev.date} ${ev.grade}学年 ${ev.period}限</span>
+                <button type="button" class="scan-item-remove text-gray-400 hover:text-red-600 font-bold px-1 flex-shrink-0" title="この項目は反映しない">✕</button>
+              </div>
+              <input type="text" value="${ev.value}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
+            </li>
+          `).join('');
+        }
+
+        document.getElementById('swap-scan-result-area').classList.remove('hidden');
+        document.getElementById('btn-apply-swap-scan').classList.remove('hidden');
+
+      } catch (error) {
+        console.error(error);
+        progress.classList.add('hidden');
+        errorArea.textContent = error.message;
+        errorArea.classList.remove('hidden');
+        e.target.value = '';
+      }
+    });
+
+    document.getElementById('btn-apply-swap-scan').addEventListener('click', async () => {
+      const items = document.querySelectorAll('#swap-extracted-events-list .scan-item');
+      if (items.length === 0) return document.getElementById('swap-scan-modal').classList.add('hidden');
+
+      const overridesByDate = {};
+      items.forEach(item => {
+        const dateStr = item.dataset.date;
+        const grade = item.dataset.grade;
+        const val = item.querySelector('.scan-val').value;
+        if (!overridesByDate[dateStr]) overridesByDate[dateStr] = {};
+        if (!overridesByDate[dateStr][grade]) overridesByDate[dateStr][grade] = {};
+        overridesByDate[dateStr][grade][item.dataset.period] = val;
+      });
+
+      await applyPeriodOverrideUpdates(overridesByDate);
+
+      alert("振替・特別スケジュールを反映しました！授業時数カウントに反映されます。");
+      renderView();
+      document.getElementById('swap-scan-modal').classList.add('hidden');
+      document.getElementById('swap-file-upload').value = '';
     });
 
     // === キャンバス (メモ機能) ===
