@@ -158,7 +158,7 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
-    import { getFirestore, doc, getDoc, setDoc, collection, query, where, documentId, getDocs } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+    import { getFirestore, doc, getDoc, setDoc, collection, query, where, documentId, getDocs, onSnapshot } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
     import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
 
     // Firebase Configuration
@@ -188,6 +188,10 @@
     const loginScreen = document.getElementById('login-screen');
     const authError = document.getElementById('auth-error');
 
+    // 表示中の日付のFirestoreリスナー。他端末での変更をリアルタイムに反映し、
+    // 古いローカルデータで上書き保存してしまう（スマホとPCの内容が食い違う）事故を防ぐ
+    let unsubscribeDayListener = null;
+
     function formatDateStr(dateObj) {
       return `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
     }
@@ -214,6 +218,7 @@
         loadDataForCurrentDate();
       } else {
         appState.currentUserId = null;
+        if (unsubscribeDayListener) { unsubscribeDayListener(); unsubscribeDayListener = null; }
         loginScreen.classList.remove('hidden');
       }
     });
@@ -254,12 +259,20 @@
     });
 
     // === Firestore データ制御 ===
+    // 表示中の日付をリアルタイムリスナーで購読する。一度読み込んだきりのデータを
+    // 保持し続けると、他端末（例: スマホとPC）が同じ日を編集した際に古い内容で
+    // 上書き保存してしまうため、常にFirestore側の最新状態を保持するようにしている。
     async function loadDataForCurrentDate() {
       if (!appState.currentUserId) return;
       const dateStr = formatDateStr(appState.currentDate);
-      try {
-        const docRef = doc(db, "users", appState.currentUserId, "planner_data", dateStr);
-        const docSnap = await getDoc(docRef);
+
+      if (unsubscribeDayListener) {
+        unsubscribeDayListener();
+        unsubscribeDayListener = null;
+      }
+
+      const docRef = doc(db, "users", appState.currentUserId, "planner_data", dateStr);
+      unsubscribeDayListener = onSnapshot(docRef, (docSnap) => {
         if (docSnap.exists()) {
           appState.dayData = docSnap.data();
           if(!appState.dayData.events) appState.dayData.events = [];
@@ -269,14 +282,14 @@
           const hadDuplicates = dedupedEvents.length !== appState.dayData.events.length || dedupedSchoolEvents.length !== appState.dayData.schoolEvents.length;
           appState.dayData.events = dedupedEvents;
           appState.dayData.schoolEvents = dedupedSchoolEvents;
-          if (hadDuplicates) await saveCurrentDayData();
+          if (hadDuplicates) saveCurrentDayData();
         } else {
           appState.dayData = { timetableType: '通常', events: [], schoolEvents: [], memo: null };
         }
         renderView();
-      } catch (e) {
+      }, (e) => {
         console.error("Error loading data:", e);
-      }
+      });
     }
 
     async function saveCurrentDayData() {
