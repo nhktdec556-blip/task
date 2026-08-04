@@ -661,6 +661,8 @@
         const weekday = key.split('-')[0];
         const classCode = parseClassCode(text);
         if (!/^\d+-\d+$/.test(classCode)) return; // 「会議」等クラス表記でない項目は集計対象外
+        const subject = String(text).slice(classCode.length).trim();
+        if (subject !== '社会') return; // 同じクラスでも学活・総合・道徳等は除き、社会科のみ集計
         slots.push({ weekday, classCode });
         classCodeSet.add(classCode);
       });
@@ -683,7 +685,7 @@
       const months = getMonthsUntilMarch(new Date());
       const { classCodes, counts } = computeLessonCounts(appState.weeklyTimetable || {}, months);
 
-      let html = `<div class="p-3 bg-gray-50 border-b"><div class="font-bold text-lg">授業時数カウント（今月〜3月）</div></div>`;
+      let html = `<div class="p-3 bg-gray-50 border-b"><div class="font-bold text-lg">授業時数カウント（社会科・今月〜3月）</div></div>`;
 
       if (classCodes.length === 0) {
         html += `<p class="text-gray-400 italic text-center py-10">時間割が登録されていません。「📸」ボタンから石川先生の時間割表を取り込んでください。</p>`;
