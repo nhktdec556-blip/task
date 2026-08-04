@@ -75,6 +75,7 @@
       <button data-view="day" class="tab-btn px-2 py-1 md:px-3 rounded-md bg-white text-gray-800 font-bold whitespace-nowrap">日</button>
       <button data-view="year" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">年間</button>
       <button data-view="class-matrix" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">週授業</button>
+      <button data-view="lesson-count" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">時数</button>
     </nav>
     <div class="flex items-center ml-2 space-x-2">
       <button id="btn-scan" class="bg-blue-600 hover:bg-blue-500 p-1 md:px-2 rounded text-sm flex items-center shadow whitespace-nowrap" title="週報スキャン">📸</button>
@@ -181,7 +182,8 @@
       currentView: 'day', 
       currentDate: new Date(),
       currentUserId: null,
-      dayData: { timetableType: '通常', events: [], schoolEvents: [], memo: null }
+      dayData: { timetableType: '通常', events: [], schoolEvents: [], memo: null },
+      weeklyTimetable: {}
     };
 
     const viewContainer = document.getElementById('view-container');
@@ -191,9 +193,35 @@
     // 表示中の日付のFirestoreリスナー。他端末での変更をリアルタイムに反映し、
     // 古いローカルデータで上書き保存してしまう（スマホとPCの内容が食い違う）事故を防ぐ
     let unsubscribeDayListener = null;
+    // 石川先生の週間時間割（曜日+限→クラス・教科）のリスナー。日/週/週授業/時数の各ビューで共有する
+    let unsubscribeTimetableListener = null;
+
+    function subscribeWeeklyTimetable() {
+      if (unsubscribeTimetableListener) {
+        unsubscribeTimetableListener();
+        unsubscribeTimetableListener = null;
+      }
+      const docRef = doc(db, "users", appState.currentUserId, "settings", "weekly_timetable");
+      unsubscribeTimetableListener = onSnapshot(docRef, (docSnap) => {
+        appState.weeklyTimetable = docSnap.exists() ? docSnap.data() : {};
+        renderView();
+      }, (e) => {
+        console.error("Error loading weekly timetable:", e);
+      });
+    }
 
     function formatDateStr(dateObj) {
       return `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
+    }
+
+    // 指定した日付（曜日）に石川先生が担当する授業コマを1〜6限の順で返す
+    function getClassesForDate(dateObj) {
+      const jpWeekdays = ['日', '月', '火', '水', '木', '金', '土'];
+      const weekday = jpWeekdays[dateObj.getDay()];
+      const timetable = appState.weeklyTimetable || {};
+      return [1, 2, 3, 4, 5, 6]
+        .map(period => ({ period, text: timetable[`${weekday}-${period}`] }))
+        .filter(c => c.text);
     }
 
     // 同一内容の予定が重複登録されるのを防ぐ（一括反映を複数回押した場合など）
@@ -216,9 +244,11 @@
         appState.currentUserId = user.uid;
         loginScreen.classList.add('hidden');
         loadDataForCurrentDate();
+        subscribeWeeklyTimetable();
       } else {
         appState.currentUserId = null;
         if (unsubscribeDayListener) { unsubscribeDayListener(); unsubscribeDayListener = null; }
+        if (unsubscribeTimetableListener) { unsubscribeTimetableListener(); unsubscribeTimetableListener = null; }
         loginScreen.classList.remove('hidden');
       }
     });
@@ -345,7 +375,8 @@
         case 'week': await renderWeekView(); break;
         case 'day': renderDayView(); break;
         case 'year': await renderYearView(); break;
-        case 'class-matrix': await renderClassMatrix(); break;
+        case 'class-matrix': renderClassMatrix(); break;
+        case 'lesson-count': renderLessonCountView(); break;
       }
 
       if (animationClass) {
@@ -422,9 +453,11 @@
         const isToday = (currentLoopDate.toDateString() === new Date().toDateString());
         const bgClass = isToday ? "bg-blue-50" : "bg-white";
         const dayEvents = schoolEventsMap[dateStr] || [];
-        const eventsHtml = dayEvents.length > 0
-          ? dayEvents.map(ev => `<div class="text-xs bg-red-50 text-red-700 rounded px-1 mb-0.5 truncate">🏫 ${ev}</div>`).join('')
-          : `<div class="text-xs text-gray-400 mt-1">タップして詳細</div>`;
+        const dayClasses = getClassesForDate(currentLoopDate);
+        const schoolHtml = dayEvents.map(ev => `<div class="text-xs bg-red-50 text-red-700 rounded px-1 mb-0.5 truncate">🏫 ${ev}</div>`).join('');
+        const classHtml = dayClasses.slice(0, 2).map(c => `<div class="text-xs bg-indigo-50 text-indigo-700 rounded px-1 mb-0.5 truncate">🎓 ${c.period}限 ${c.text}</div>`).join('');
+        const classMoreHtml = dayClasses.length > 2 ? `<div class="text-[10px] text-gray-400">+${dayClasses.length - 2}コマ</div>` : '';
+        const eventsHtml = (schoolHtml + classHtml + classMoreHtml) || `<div class="text-xs text-gray-400 mt-1">タップして詳細</div>`;
 
         html += `
           <div data-action="go-day" data-date="${dateStr}" class="${bgClass} flex-1 p-2 flex border-b cursor-pointer hover:bg-gray-50">
@@ -454,6 +487,16 @@
             </li>
           `).join('')
         : '<p class="text-gray-400 italic mb-2 text-sm">校内行事予定はありません</p>';
+
+      const todaysClasses = getClassesForDate(appState.currentDate);
+      let classesHtml = todaysClasses.length > 0
+        ? todaysClasses.map(c => `
+            <li class="p-3 bg-indigo-50 rounded border border-indigo-100 mb-2 flex items-center shadow-sm">
+              <span class="text-indigo-600 font-bold text-sm w-12 flex-shrink-0">${c.period}限</span>
+              <span class="flex-1 text-indigo-900 font-medium">🎓 ${c.text}</span>
+            </li>
+          `).join('')
+        : '<p class="text-gray-400 italic mb-2 text-sm">この曜日の授業予定はありません</p>';
 
       let eventsHtml = appState.dayData.events.length > 0
         ? appState.dayData.events.map((e, idx) => `
@@ -486,6 +529,8 @@
           </div>
           <h3 class="font-bold text-gray-700 mb-3 border-l-4 border-red-500 pl-2">校内行事予定</h3>
           <ul class="mb-6">${schoolEventsHtml}</ul>
+          <h3 class="font-bold text-gray-700 mb-3 border-l-4 border-indigo-500 pl-2">石川先生の授業予定</h3>
+          <ul class="mb-6">${classesHtml}</ul>
           <h3 class="font-bold text-gray-700 mb-3 border-l-4 border-blue-500 pl-2">本日の予定</h3>
           <ul class="mb-6">${eventsHtml}</ul>
           ${appState.dayData.memo ? `<h3 class="font-bold text-gray-700 mt-6 mb-3 border-l-4 border-yellow-500 pl-2">保存されたメモ</h3><img src="${appState.dayData.memo}" class="border rounded-lg bg-yellow-50 w-full shadow-sm" />` : ''}
@@ -550,18 +595,8 @@
       viewContainer.innerHTML = html;
     }
 
-    async function renderClassMatrix() {
-      let timetable = {};
-      if (appState.currentUserId) {
-        try {
-          const docRef = doc(db, "users", appState.currentUserId, "settings", "weekly_timetable");
-          const docSnap = await getDoc(docRef);
-          if (docSnap.exists()) timetable = docSnap.data();
-        } catch (e) {
-          console.error("Error loading weekly timetable:", e);
-        }
-      }
-
+    function renderClassMatrix() {
+      const timetable = appState.weeklyTimetable || {};
       const days = ['月', '火', '水', '木', '金'];
       const hasAny = Object.keys(timetable).length > 0;
 
@@ -582,6 +617,103 @@
           `).join('')}
         </tbody></table>
       </div>`;
+      viewContainer.innerHTML = html;
+    }
+
+    // クラスコードを授業内容テキストから取り出す（例: "3-4 社会" → "3-4"）
+    function parseClassCode(text) {
+      const match = String(text).match(/^(\S+)/);
+      return match ? match[1] : String(text);
+    }
+
+    // 起点となる月から、その学年度末（3月）までの{year, month(0始まり)}の一覧を作る
+    function getMonthsUntilMarch(fromDate) {
+      const months = [];
+      let y = fromDate.getFullYear();
+      let m = fromDate.getMonth();
+      const endY = (m >= 3) ? y + 1 : y; // 4月始まりの年度なので、4月以降なら翌年3月まで
+      while (true) {
+        months.push({ year: y, month: m });
+        if (y === endY && m === 2) break;
+        m++;
+        if (m > 11) { m = 0; y++; }
+      }
+      return months;
+    }
+
+    // 指定した年月に、月〜金の各曜日が何回あるかを数える
+    function countWeekdaysInMonth(year, month) {
+      const jpWeekdays = ['日', '月', '火', '水', '木', '金', '土'];
+      const counts = { '月': 0, '火': 0, '水': 0, '木': 0, '金': 0 };
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      for (let d = 1; d <= daysInMonth; d++) {
+        const wd = jpWeekdays[new Date(year, month, d).getDay()];
+        if (counts[wd] !== undefined) counts[wd]++;
+      }
+      return counts;
+    }
+
+    // 週間時間割から、クラスごと・月ごとの授業時数を集計する
+    function computeLessonCounts(timetable, months) {
+      const slots = [];
+      const classCodeSet = new Set();
+      Object.entries(timetable).forEach(([key, text]) => {
+        const weekday = key.split('-')[0];
+        const classCode = parseClassCode(text);
+        if (!/^\d+-\d+$/.test(classCode)) return; // 「会議」等クラス表記でない項目は集計対象外
+        slots.push({ weekday, classCode });
+        classCodeSet.add(classCode);
+      });
+
+      const classCodes = Array.from(classCodeSet).sort();
+      const counts = {};
+      classCodes.forEach(code => { counts[code] = months.map(() => 0); });
+
+      months.forEach((ym, idx) => {
+        const weekdayCounts = countWeekdaysInMonth(ym.year, ym.month);
+        slots.forEach(slot => {
+          counts[slot.classCode][idx] += weekdayCounts[slot.weekday] || 0;
+        });
+      });
+
+      return { classCodes, counts };
+    }
+
+    function renderLessonCountView() {
+      const months = getMonthsUntilMarch(new Date());
+      const { classCodes, counts } = computeLessonCounts(appState.weeklyTimetable || {}, months);
+
+      let html = `<div class="p-3 bg-gray-50 border-b"><div class="font-bold text-lg">授業時数カウント（今月〜3月）</div></div>`;
+
+      if (classCodes.length === 0) {
+        html += `<p class="text-gray-400 italic text-center py-10">時間割が登録されていません。「📸」ボタンから石川先生の時間割表を取り込んでください。</p>`;
+      } else {
+        html += `<div class="flex-1 overflow-auto p-2">
+          <table class="matrix-table text-xs md:text-sm bg-white" style="min-width: 640px;">
+            <thead>
+              <tr class="bg-gray-100">
+                <th class="sticky left-0 bg-gray-100 z-10">クラス</th>
+                ${months.map(ym => `<th class="min-w-[48px]">${ym.month + 1}月</th>`).join('')}
+                <th class="min-w-[56px] bg-gray-200">合計</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${classCodes.map(code => {
+                const rowCounts = counts[code];
+                const total = rowCounts.reduce((a, b) => a + b, 0);
+                return `
+                  <tr>
+                    <td class="font-bold text-center bg-gray-50 sticky left-0">${code}</td>
+                    ${rowCounts.map(c => `<td class="text-center">${c}</td>`).join('')}
+                    <td class="text-center font-bold bg-gray-100">${total}</td>
+                  </tr>
+                `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>`;
+      }
+
       viewContainer.innerHTML = html;
     }
 
