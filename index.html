@@ -192,6 +192,20 @@
       return `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
     }
 
+    // 同一内容の予定が重複登録されるのを防ぐ（一括反映を複数回押した場合など）
+    function dedupeEvents(arr) {
+      if (!Array.isArray(arr)) return [];
+      const seen = new Set();
+      const result = [];
+      arr.forEach(item => {
+        const key = typeof item === 'string' ? item : (item && item.text);
+        if (key === undefined || key === null || seen.has(key)) return;
+        seen.add(key);
+        result.push(item);
+      });
+      return result;
+    }
+
     // === 認証 (Authentication) ===
     onAuthStateChanged(auth, (user) => {
       if (user) {
@@ -250,6 +264,12 @@
           appState.dayData = docSnap.data();
           if(!appState.dayData.events) appState.dayData.events = [];
           if(!appState.dayData.schoolEvents) appState.dayData.schoolEvents = [];
+          const dedupedEvents = dedupeEvents(appState.dayData.events);
+          const dedupedSchoolEvents = dedupeEvents(appState.dayData.schoolEvents);
+          const hadDuplicates = dedupedEvents.length !== appState.dayData.events.length || dedupedSchoolEvents.length !== appState.dayData.schoolEvents.length;
+          appState.dayData.events = dedupedEvents;
+          appState.dayData.schoolEvents = dedupedSchoolEvents;
+          if (hadDuplicates) await saveCurrentDayData();
         } else {
           appState.dayData = { timetableType: '通常', events: [], schoolEvents: [], memo: null };
         }
@@ -281,8 +301,9 @@
         const snap = await getDocs(q);
         snap.forEach(docSnap => {
           const data = docSnap.data();
-          if (data.schoolEvents && data.schoolEvents.length > 0) {
-            result[docSnap.id] = data.schoolEvents;
+          const deduped = dedupeEvents(data.schoolEvents);
+          if (deduped.length > 0) {
+            result[docSnap.id] = deduped;
           }
         });
       } catch (e) {
@@ -311,7 +332,7 @@
         case 'week': await renderWeekView(); break;
         case 'day': renderDayView(); break;
         case 'year': await renderYearView(); break;
-        case 'class-matrix': renderClassMatrix(); break;
+        case 'class-matrix': await renderClassMatrix(); break;
       }
 
       if (animationClass) {
@@ -464,13 +485,9 @@
       const year = appState.currentDate.getFullYear();
       const schoolEventsMap = await fetchSchoolEventsInRange(`${year}-01-01`, `${year}-12-31`);
 
-      const monthGroups = Array.from({ length: 12 }, () => []);
-      Object.keys(schoolEventsMap).sort().forEach(dateStr => {
-        const [, m, day] = dateStr.split('-').map(Number);
-        schoolEventsMap[dateStr].forEach(text => {
-          monthGroups[m - 1].push({ day, text, dateStr });
-        });
-      });
+      const daysInMonths = Array.from({ length: 12 }, (_, m) => new Date(year, m + 1, 0).getDate());
+      const maxDays = Math.max(...daysInMonths);
+      const hasAny = Object.keys(schoolEventsMap).length > 0;
 
       let html = `
         <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
@@ -478,43 +495,86 @@
           <div class="font-bold text-lg cursor-pointer" data-action="today">${year}年 年間行事予定</div>
           <button data-action="next-year" class="px-3 py-1 bg-white border rounded shadow-sm font-bold text-gray-600">＞</button>
         </div>
-        <div class="flex-1 overflow-y-auto p-3 space-y-4">
       `;
 
-      const hasAny = monthGroups.some(arr => arr.length > 0);
       if (!hasAny) {
-        html += `<p class="text-gray-400 italic text-center py-10">校内行事予定が登録されていません。<br>「📸」ボタンから月報を取り込んでください。</p>`;
-      } else {
-        monthGroups.forEach((items, idx) => {
-          if (items.length === 0) return;
-          html += `
-            <div class="border rounded-lg overflow-hidden">
-              <div class="bg-gray-100 px-3 py-2 font-bold text-gray-700 border-b">${idx + 1}月</div>
-              <ul>
-                ${items.map(it => `
-                  <li data-action="go-day" data-date="${it.dateStr}" class="flex px-3 py-2 border-b last:border-b-0 hover:bg-red-50 cursor-pointer items-center">
-                    <span class="w-12 text-center font-bold text-red-600 flex-shrink-0">${it.day}日</span>
-                    <span class="flex-1 text-sm text-gray-800">🏫 ${it.text}</span>
-                  </li>
-                `).join('')}
-              </ul>
-            </div>
-          `;
-        });
+        html += `<p class="text-gray-400 italic text-center py-3 text-sm">校内行事予定が登録されていません。「📸」ボタンから月報を取り込んでください。</p>`;
       }
-      html += `</div>`;
+
+      html += `<div class="flex-1 overflow-auto p-2">
+        <table class="matrix-table text-[10px] md:text-xs bg-white" style="min-width: 820px;">
+          <thead>
+            <tr class="bg-gray-100">
+              <th class="w-8 sticky left-0 top-0 z-20 bg-gray-100">日</th>
+              ${Array.from({ length: 12 }, (_, m) => `<th class="min-w-[64px] sticky top-0 z-10 bg-gray-100">${m + 1}月</th>`).join('')}
+            </tr>
+          </thead>
+          <tbody>
+      `;
+
+      for (let day = 1; day <= maxDays; day++) {
+        html += `<tr><td class="text-center font-bold bg-gray-50 sticky left-0 z-10">${day}</td>`;
+        for (let m = 0; m < 12; m++) {
+          if (day > daysInMonths[m]) {
+            html += `<td class="bg-gray-100"></td>`;
+            continue;
+          }
+          const dateStr = `${year}-${String(m + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+          const dayEvents = schoolEventsMap[dateStr] || [];
+          if (dayEvents.length === 0) {
+            html += `<td data-action="go-day" data-date="${dateStr}" class="cursor-pointer hover:bg-blue-50"></td>`;
+          } else {
+            const titleAttr = dayEvents.join(' / ').replace(/"/g, '&quot;');
+            const label = dayEvents[0].length > 6 ? dayEvents[0].slice(0, 6) + '…' : dayEvents[0];
+            const moreLabel = dayEvents.length > 1 ? `<div class="text-[8px] leading-none">+${dayEvents.length - 1}</div>` : '';
+            html += `<td data-action="go-day" data-date="${dateStr}" title="${titleAttr}" class="bg-red-100 text-red-700 cursor-pointer hover:bg-red-200 leading-tight px-1 align-middle">${label}${moreLabel}</td>`;
+          }
+        }
+        html += `</tr>`;
+      }
+
+      html += `</tbody></table></div>`;
       viewContainer.innerHTML = html;
     }
 
-    function renderClassMatrix() {
-      viewContainer.innerHTML = `<table class="matrix-table text-xs md:text-sm bg-white"><thead><tr class="bg-gray-100"><th class="w-10">限</th><th>月</th><th>火</th><th>水</th><th>木</th><th>金</th></tr></thead><tbody>
-        ${[1,2,3,4,5,6].map(i => `<tr><td class="text-center font-bold bg-gray-50">${i}</td><td/><td/><td class="bg-blue-50 text-blue-800">2年1組 技術</td><td/><td/></tr>`).join('')}
-      </tbody></table>`;
+    async function renderClassMatrix() {
+      let timetable = {};
+      if (appState.currentUserId) {
+        try {
+          const docRef = doc(db, "users", appState.currentUserId, "settings", "weekly_timetable");
+          const docSnap = await getDoc(docRef);
+          if (docSnap.exists()) timetable = docSnap.data();
+        } catch (e) {
+          console.error("Error loading weekly timetable:", e);
+        }
+      }
+
+      const days = ['月', '火', '水', '木', '金'];
+      const hasAny = Object.keys(timetable).length > 0;
+
+      let html = `<div class="p-3 bg-gray-50 border-b"><div class="font-bold text-lg">石川先生 週間授業予定</div></div>`;
+      if (!hasAny) {
+        html += `<p class="text-gray-400 italic text-center py-3 text-sm">時間割が登録されていません。「📸」ボタンから石川先生の時間割表を取り込んでください。</p>`;
+      }
+      html += `<div class="flex-1 overflow-auto p-2">
+        <table class="matrix-table text-xs md:text-sm bg-white"><thead><tr class="bg-gray-100"><th class="w-10">限</th>${days.map(d => `<th>${d}</th>`).join('')}</tr></thead><tbody>
+          ${[1, 2, 3, 4, 5, 6].map(period => `
+            <tr>
+              <td class="text-center font-bold bg-gray-50">${period}</td>
+              ${days.map(d => {
+                const text = timetable[`${d}-${period}`];
+                return text ? `<td class="bg-blue-50 text-blue-800">${text}</td>` : `<td></td>`;
+              }).join('')}
+            </tr>
+          `).join('')}
+        </tbody></table>
+      </div>`;
+      viewContainer.innerHTML = html;
     }
 
     // === ナビゲーション & クリックイベント ===
     viewContainer.addEventListener('click', async (e) => {
-      const action = e.target.closest('button[data-action]') || e.target.closest('div[data-action]');
+      const action = e.target.closest('[data-action]');
       if (action) {
         const type = action.dataset.action;
         if (type === 'today') { appState.currentDate = new Date(); await loadDataForCurrentDate(); }
@@ -663,17 +723,18 @@
         1. 校内行事予定：月報に記載されている学校全体の行事・特別な日課（例: 始業式、参観日、定期テスト、避難訓練、生徒総会、短縮日課など）。月報からはこれを最優先かつ網羅的に抽出してください。
         2. 「石川」先生に関連する個人の予定（会議、出張、部活動など）
         3. 時間割の変更情報（例: 月1を火2へ変更、授業のカット等）
+        4. 石川先生の週間授業時間割：ファイルに「先生名 石川」等と書かれた個人の週間時間割表（月〜金の曜日と1〜6限の組み合わせで、各コマに「3-4 社会」のような組・教科が書かれている表）や、月報内で「月1」「火3」のように曜日+限（コマ）を短縮表記している欄がある場合、その組み合わせを1コマずつ抽出してください。この場合は日付(date)の代わりに、曜日を表す"day"（"月""火""水""木""金"のいずれか）と、限を表す"period"（1〜6の数値）を使い、"text"にはそのコマの内容（例: "3-4 社会"）を入れてください。
 
         【重要なルール】
         ・推測で予定を作らないでください。
-        ・ファイルに記載されていない日付のデータは出力しないでください。
+        ・ファイルに記載されていない日付・コマのデータは出力しないでください。
         ・資料に年度・月の記載がある場合はそれをもとにYYYY-MM-DD形式の日付へ正しく変換してください。
         ・同じ日に複数の行事がある場合は、それぞれを別々の配列要素として出力してください。
         ・Markdownのバッククォート（\`\`\`json など）は絶対に含めず、純粋なJSON配列のみを出力してください。
         ・出力トークンを節約するため、改行・インデント・余分な空白を一切入れず、必ず1行の圧縮されたJSON配列として出力してください。
 
         【出力フォーマット（実際は改行を入れず1行で出力すること）】
-        [{"date": "YYYY-MM-DD", "type": "行事", "text": "始業式（短縮日課）"}, {"date": "YYYY-MM-DD", "type": "石川", "text": "14:00 教科部会"}, {"date": "YYYY-MM-DD", "type": "変更", "text": "3限の授業カット"}]
+        [{"date": "YYYY-MM-DD", "type": "行事", "text": "始業式（短縮日課）"}, {"date": "YYYY-MM-DD", "type": "石川", "text": "14:00 教科部会"}, {"date": "YYYY-MM-DD", "type": "変更", "text": "3限の授業カット"}, {"type": "時間割", "day": "月", "period": 1, "text": "3-4 社会"}]
       `;
 
       const requestBody = {
@@ -788,6 +849,19 @@
             if (ev.type === "行事" || ev.type === "学校") badgeClass = "bg-red-100 text-red-700";
             if (ev.type === "石川") badgeClass = "bg-blue-100 text-blue-700";
             if (ev.type === "変更") badgeClass = "bg-yellow-100 text-yellow-700";
+            if (ev.type === "時間割") badgeClass = "bg-indigo-100 text-indigo-700";
+
+            if (ev.type === "時間割") {
+              return `
+                <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-day="${ev.day}" data-period="${ev.period}" data-type="${ev.type}">
+                  <div class="flex justify-between items-center mb-1">
+                    <span class="font-bold text-indigo-700 text-sm">${ev.day}曜 ${ev.period}限</span>
+                    <span class="${badgeClass} text-xs px-2 py-0.5 rounded">週授業</span>
+                  </div>
+                  <input type="text" value="${ev.text}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
+                </li>
+              `;
+            }
 
             return `
               <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${ev.date}" data-type="${ev.type}">
@@ -822,10 +896,15 @@
       if (items.length === 0) return document.getElementById('scan-modal').classList.add('hidden');
 
       const updates = {};
+      const timetableUpdates = {};
       items.forEach(item => {
-        const dateStr = item.dataset.date;
         const type = item.dataset.type;
         const val = item.querySelector('.scan-val').value;
+        if (type === '時間割') {
+          timetableUpdates[`${item.dataset.day}-${item.dataset.period}`] = val;
+          return;
+        }
+        const dateStr = item.dataset.date;
         if (!updates[dateStr]) updates[dateStr] = { schoolEvents: [], events: [] };
         if (type === '行事' || type === '学校') {
           updates[dateStr].schoolEvents.push(val);
@@ -842,10 +921,18 @@
         if(!data.schoolEvents) data.schoolEvents = [];
         data.events.push(...newData.events);
         data.schoolEvents.push(...newData.schoolEvents);
+        data.events = dedupeEvents(data.events);
+        data.schoolEvents = dedupeEvents(data.schoolEvents);
         if ([...newData.events, ...newData.schoolEvents].some(e => e.includes('短縮'))) data.timetableType = '短縮';
         await setDoc(docRef, data);
       }
-      alert("校内行事予定・予定を一括でカレンダーに反映しました！月・週・日・年間予定に反映されます。");
+
+      if (Object.keys(timetableUpdates).length > 0) {
+        const timetableRef = doc(db, "users", appState.currentUserId, "settings", "weekly_timetable");
+        await setDoc(timetableRef, timetableUpdates, { merge: true });
+      }
+
+      alert("校内行事予定・予定を一括でカレンダーに反映しました！月・週・日・年間予定・週授業に反映されます。");
       await loadDataForCurrentDate();
       document.getElementById('scan-modal').classList.add('hidden');
       document.getElementById('file-upload').value = ''; // 次回のためにリセット
