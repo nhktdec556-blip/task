@@ -355,6 +355,27 @@
       return result;
     }
 
+    // 指定した日付範囲の授業振替・特別スケジュール（periodOverrides）をまとめて取得する
+    // 月報から抽出した振替情報を使って、授業時数カウントを実際の日付に基づき正確に計算するために使用
+    async function fetchPeriodOverridesInRange(startStr, endStr) {
+      const result = {};
+      if (!appState.currentUserId) return result;
+      try {
+        const colRef = collection(db, "users", appState.currentUserId, "planner_data");
+        const q = query(colRef, where(documentId(), '>=', startStr), where(documentId(), '<=', endStr));
+        const snap = await getDocs(q);
+        snap.forEach(docSnap => {
+          const data = docSnap.data();
+          if (data.periodOverrides && Object.keys(data.periodOverrides).length > 0) {
+            result[docSnap.id] = data.periodOverrides;
+          }
+        });
+      } catch (e) {
+        console.error("Error fetching period overrides range:", e);
+      }
+      return result;
+    }
+
     // === 画面描画制御 ===
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -376,7 +397,7 @@
         case 'day': renderDayView(); break;
         case 'year': await renderYearView(); break;
         case 'class-matrix': renderClassMatrix(); break;
-        case 'lesson-count': renderLessonCountView(); break;
+        case 'lesson-count': await renderLessonCountView(); break;
       }
 
       if (animationClass) {
@@ -641,53 +662,79 @@
       return months;
     }
 
-    // 指定した年月に、月〜金の各曜日が何回あるかを数える
-    function countWeekdaysInMonth(year, month) {
-      const jpWeekdays = ['日', '月', '火', '水', '木', '金', '土'];
-      const counts = { '月': 0, '火': 0, '水': 0, '木': 0, '金': 0 };
-      const daysInMonth = new Date(year, month + 1, 0).getDate();
-      for (let d = 1; d <= daysInMonth; d++) {
-        const wd = jpWeekdays[new Date(year, month, d).getDay()];
-        if (counts[wd] !== undefined) counts[wd]++;
-      }
-      return counts;
-    }
+    // 「火1」のような曜日+時限の振替表記を解析する（マッチしなければテスト等の固定表記とみなす）
+    const SWAP_PATTERN = /^(月|火|水|木|金)([1-6])$/;
+    const JP_WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
 
-    // 週間時間割から、クラスごと・月ごとの授業時数を集計する
-    function computeLessonCounts(timetable, months) {
-      const slots = [];
-      const classCodeSet = new Set();
+    // 週間時間割(石川先生の社会科のコマ)から、クラスごと・月ごとの授業時数を実日付ベースで集計する。
+    // 月報から振替（例:「火1」）や特別スケジュール（テスト・学活等）が抽出できている日付はそれを優先し、
+    // 抽出できていない日付はその日の実際の曜日どおりに通常授業が行われるものとして概算する。
+    function computeLessonCounts(timetable, months, overridesMap) {
+      const naturalMap = {}; // `${曜日}-${限}` -> クラスコード（社会科のみ）
+      const gradeToClassCodes = {};
       Object.entries(timetable).forEach(([key, text]) => {
-        const weekday = key.split('-')[0];
+        const [weekday, period] = key.split('-');
         const classCode = parseClassCode(text);
-        if (!/^\d+-\d+$/.test(classCode)) return; // 「会議」等クラス表記でない項目は集計対象外
-        slots.push({ weekday, classCode });
-        classCodeSet.add(classCode);
+        if (!/^\d+-\d+$/.test(classCode)) return; // 「会議」等クラス表記でない項目は対象外
+        const subject = String(text).slice(classCode.length).trim();
+        if (subject !== '社会') return; // 同じクラスでも学活・総合・道徳等は除き、社会科のみ集計
+        naturalMap[`${weekday}-${period}`] = classCode;
+        const grade = classCode.split('-')[0];
+        if (!gradeToClassCodes[grade]) gradeToClassCodes[grade] = new Set();
+        gradeToClassCodes[grade].add(classCode);
       });
 
-      const classCodes = Array.from(classCodeSet).sort();
+      const classCodes = Array.from(new Set(Object.values(naturalMap))).sort();
       const counts = {};
       classCodes.forEach(code => { counts[code] = months.map(() => 0); });
+      if (classCodes.length === 0) return { classCodes, counts };
 
-      months.forEach((ym, idx) => {
-        const weekdayCounts = countWeekdaysInMonth(ym.year, ym.month);
-        slots.forEach(slot => {
-          counts[slot.classCode][idx] += weekdayCounts[slot.weekday] || 0;
-        });
+      const grades = Object.keys(gradeToClassCodes);
+
+      months.forEach((ym, monthIdx) => {
+        const daysInMonth = new Date(ym.year, ym.month + 1, 0).getDate();
+        for (let d = 1; d <= daysInMonth; d++) {
+          const dateObj = new Date(ym.year, ym.month, d);
+          const realWeekday = JP_WEEKDAYS[dateObj.getDay()];
+          if (!['月', '火', '水', '木', '金'].includes(realWeekday)) continue; // 土日は対象外
+          const dateStr = `${ym.year}-${String(ym.month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+          const dayOverrides = overridesMap[dateStr];
+
+          grades.forEach(grade => {
+            for (let period = 1; period <= 6; period++) {
+              const override = dayOverrides && dayOverrides[grade] && dayOverrides[grade][String(period)];
+              let effWeekday = realWeekday, effPeriod = period;
+              if (override !== undefined) {
+                const m = SWAP_PATTERN.exec(override);
+                if (m) { effWeekday = m[1]; effPeriod = Number(m[2]); }
+                else continue; // テスト・学活等の固定表記 → この学年・限は社会科の授業なし
+              }
+              const classCode = naturalMap[`${effWeekday}-${effPeriod}`];
+              if (classCode && gradeToClassCodes[grade].has(classCode)) {
+                counts[classCode][monthIdx]++;
+              }
+            }
+          });
+        }
       });
 
       return { classCodes, counts };
     }
 
-    function renderLessonCountView() {
+    async function renderLessonCountView() {
       const months = getMonthsUntilMarch(new Date());
-      const { classCodes, counts } = computeLessonCounts(appState.weeklyTimetable || {}, months);
+      const startStr = `${months[0].year}-${String(months[0].month + 1).padStart(2, '0')}-01`;
+      const lastMonth = months[months.length - 1];
+      const endStr = `${lastMonth.year}-${String(lastMonth.month + 1).padStart(2, '0')}-31`;
+      const overridesMap = await fetchPeriodOverridesInRange(startStr, endStr);
+      const { classCodes, counts } = computeLessonCounts(appState.weeklyTimetable || {}, months, overridesMap);
 
-      let html = `<div class="p-3 bg-gray-50 border-b"><div class="font-bold text-lg">授業時数カウント（今月〜3月）</div></div>`;
+      let html = `<div class="p-3 bg-gray-50 border-b"><div class="font-bold text-lg">授業時数カウント（社会科・今月〜3月）</div></div>`;
 
       if (classCodes.length === 0) {
         html += `<p class="text-gray-400 italic text-center py-10">時間割が登録されていません。「📸」ボタンから石川先生の時間割表を取り込んでください。</p>`;
       } else {
+        html += `<p class="text-xs text-gray-500 px-3 pt-2">※月報から振替・特別スケジュールを取り込んだ日付は実際の内容で計算し、未取り込みの日付は通常の曜日パターンで概算しています。</p>`;
         html += `<div class="flex-1 overflow-auto p-2">
           <table class="matrix-table text-xs md:text-sm bg-white" style="min-width: 640px;">
             <thead>
@@ -868,7 +915,11 @@
         1. 校内行事予定：月報に記載されている学校全体の行事・特別な日課（例: 始業式、参観日、定期テスト、避難訓練、生徒総会、短縮日課など）。月報からはこれを最優先かつ網羅的に抽出してください。
         2. 「石川」先生に関連する個人の予定（会議、出張、部活動など）
         3. 時間割の変更情報（例: 月1を火2へ変更、授業のカット等）
-        4. 石川先生の週間授業時間割：ファイルに「先生名 石川」等と書かれた個人の週間時間割表（月〜金の曜日と1〜6限の組み合わせで、各コマに「3-4 社会」のような組・教科が書かれている表）や、月報内で「月1」「火3」のように曜日+限（コマ）を短縮表記している欄がある場合、その組み合わせを1コマずつ抽出してください。この場合は日付(date)の代わりに、曜日を表す"day"（"月""火""水""木""金"のいずれか）と、限を表す"period"（1〜6の数値）を使い、"text"にはそのコマの内容（例: "3-4 社会"）を入れてください。
+        4. 石川先生の週間授業時間割：ファイルに「先生名 石川」等と書かれた個人の週間時間割表（月〜金の曜日と1〜6限の組み合わせで、各コマに「3-4 社会」のような組・教科が書かれている表）がある場合、その組み合わせを1コマずつ抽出してください。この場合は日付(date)の代わりに、曜日を表す"day"（"月""火""水""木""金"のいずれか）と、限を表す"period"（1〜6の数値）を使い、"text"にはそのコマの内容（例: "3-4 社会"）を入れてください。
+        5. 授業の振替・特別スケジュール：月報の右端等に、学年（1・2・3など）と時限（1〜6限）ごとに、その実際の日付のその時限に何が行われるかを示す欄がある場合があります。セルの内容は主に次の2パターンです。
+           (a) 曜日+時限の組み合わせ（例:「火1」「水3」）：これは「その実際の日付のその時限は、指定された曜日（例: 火曜日）の通常時間割の同じ時限のコマに従って授業を行う（振替）」という意味です。
+           (b) テスト・学活・総合・道徳などの文言：その時限は通常の教科授業ではなく、記載された内容が行われる（＝通常の教科授業は行われない）という意味です。
+           この欄がある場合、日付・学年・時限ごとに、日付(date)の代わりに"grade"（学年を表す数字。例: "1"）と"period"（1〜6の数値）を使い、"value"にはそのセルの文言をそのまま（例: "火1"や"テスト"）入れて抽出してください。単なる学校行事名（始業式等）はこの種別ではなく1の「行事」として抽出してください。
 
         【重要なルール】
         ・推測で予定を作らないでください。
@@ -879,7 +930,7 @@
         ・出力トークンを節約するため、改行・インデント・余分な空白を一切入れず、必ず1行の圧縮されたJSON配列として出力してください。
 
         【出力フォーマット（実際は改行を入れず1行で出力すること）】
-        [{"date": "YYYY-MM-DD", "type": "行事", "text": "始業式（短縮日課）"}, {"date": "YYYY-MM-DD", "type": "石川", "text": "14:00 教科部会"}, {"date": "YYYY-MM-DD", "type": "変更", "text": "3限の授業カット"}, {"type": "時間割", "day": "月", "period": 1, "text": "3-4 社会"}]
+        [{"date": "YYYY-MM-DD", "type": "行事", "text": "始業式（短縮日課）"}, {"date": "YYYY-MM-DD", "type": "石川", "text": "14:00 教科部会"}, {"date": "YYYY-MM-DD", "type": "変更", "text": "3限の授業カット"}, {"type": "時間割", "day": "月", "period": 1, "text": "3-4 社会"}, {"type": "振替", "date": "YYYY-MM-DD", "grade": "1", "period": 1, "value": "火1"}]
       `;
 
       const requestBody = {
@@ -995,6 +1046,7 @@
             if (ev.type === "石川") badgeClass = "bg-blue-100 text-blue-700";
             if (ev.type === "変更") badgeClass = "bg-yellow-100 text-yellow-700";
             if (ev.type === "時間割") badgeClass = "bg-indigo-100 text-indigo-700";
+            if (ev.type === "振替") badgeClass = "bg-purple-100 text-purple-700";
 
             if (ev.type === "時間割") {
               return `
@@ -1004,6 +1056,18 @@
                     <span class="${badgeClass} text-xs px-2 py-0.5 rounded">週授業</span>
                   </div>
                   <input type="text" value="${ev.text}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
+                </li>
+              `;
+            }
+
+            if (ev.type === "振替") {
+              return `
+                <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${ev.date}" data-grade="${ev.grade}" data-period="${ev.period}" data-type="${ev.type}">
+                  <div class="flex justify-between items-center mb-1">
+                    <span class="font-bold text-purple-700 text-sm">${ev.date} ${ev.grade}学年 ${ev.period}限</span>
+                    <span class="${badgeClass} text-xs px-2 py-0.5 rounded">振替</span>
+                  </div>
+                  <input type="text" value="${ev.value}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
                 </li>
               `;
             }
@@ -1049,8 +1113,16 @@
           timetableUpdates[`${item.dataset.day}-${item.dataset.period}`] = val;
           return;
         }
+        if (type === '振替') {
+          const dateStr = item.dataset.date;
+          if (!updates[dateStr]) updates[dateStr] = { schoolEvents: [], events: [], periodOverrides: {} };
+          const grade = item.dataset.grade;
+          if (!updates[dateStr].periodOverrides[grade]) updates[dateStr].periodOverrides[grade] = {};
+          updates[dateStr].periodOverrides[grade][item.dataset.period] = val;
+          return;
+        }
         const dateStr = item.dataset.date;
-        if (!updates[dateStr]) updates[dateStr] = { schoolEvents: [], events: [] };
+        if (!updates[dateStr]) updates[dateStr] = { schoolEvents: [], events: [], periodOverrides: {} };
         if (type === '行事' || type === '学校') {
           updates[dateStr].schoolEvents.push(val);
         } else {
@@ -1061,13 +1133,18 @@
       for (const [dateStr, newData] of Object.entries(updates)) {
         const docRef = doc(db, "users", appState.currentUserId, "planner_data", dateStr);
         const docSnap = await getDoc(docRef);
-        let data = docSnap.exists() ? docSnap.data() : { timetableType: '通常', events: [], schoolEvents: [], memo: null };
+        let data = docSnap.exists() ? docSnap.data() : { timetableType: '通常', events: [], schoolEvents: [], memo: null, periodOverrides: {} };
         if(!data.events) data.events = [];
         if(!data.schoolEvents) data.schoolEvents = [];
+        if(!data.periodOverrides) data.periodOverrides = {};
         data.events.push(...newData.events);
         data.schoolEvents.push(...newData.schoolEvents);
         data.events = dedupeEvents(data.events);
         data.schoolEvents = dedupeEvents(data.schoolEvents);
+        // 学年・時限単位でマージし、既存の他学年・他時限の振替データを消さないようにする
+        Object.entries(newData.periodOverrides).forEach(([grade, periods]) => {
+          data.periodOverrides[grade] = { ...(data.periodOverrides[grade] || {}), ...periods };
+        });
         if ([...newData.events, ...newData.schoolEvents].some(e => e.includes('短縮'))) data.timetableType = '短縮';
         await setDoc(docRef, data);
       }
@@ -1077,7 +1154,7 @@
         await setDoc(timetableRef, timetableUpdates, { merge: true });
       }
 
-      alert("校内行事予定・予定を一括でカレンダーに反映しました！月・週・日・年間予定・週授業に反映されます。");
+      alert("校内行事予定・予定を一括でカレンダーに反映しました！月・週・日・年間予定・週授業・時数カウントに反映されます。");
       await loadDataForCurrentDate();
       document.getElementById('scan-modal').classList.add('hidden');
       document.getElementById('file-upload').value = ''; // 次回のためにリセット
