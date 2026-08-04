@@ -73,6 +73,7 @@
       <button data-view="month" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">月</button>
       <button data-view="week" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">週</button>
       <button data-view="day" class="tab-btn px-2 py-1 md:px-3 rounded-md bg-white text-gray-800 font-bold whitespace-nowrap">日</button>
+      <button data-view="year" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">年間</button>
       <button data-view="class-matrix" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">週授業</button>
     </nav>
     <div class="flex items-center ml-2 space-x-2">
@@ -120,7 +121,7 @@
   <div id="scan-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
     <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 flex flex-col max-h-full">
       <h2 class="text-xl font-bold mb-4 border-b pb-2">週報・月報から予定を追加</h2>
-      <p class="text-xs text-gray-500 mb-4">PDFや画像をアップロードすると、Gemini 1.5 Proが「石川」先生の予定などを解析して抽出します。</p>
+      <p class="text-xs text-gray-500 mb-4">月報（月間行事予定表）や週報のPDF・画像をアップロードすると、Gemini 1.5 Proが校内行事予定や「石川」先生の予定などを解析して抽出します。抽出された校内行事予定は月・週・日・年間予定すべてに反映されます。</p>
       <input type="file" id="file-upload" accept="image/*,application/pdf" class="mb-4 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700" />
       
       <!-- エラー表示エリア -->
@@ -157,7 +158,7 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-app.js";
-    import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
+    import { getFirestore, doc, getDoc, setDoc, collection, query, where, documentId, getDocs } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-firestore.js";
     import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/10.8.1/firebase-auth.js";
 
     // Firebase Configuration
@@ -180,7 +181,7 @@
       currentView: 'day', 
       currentDate: new Date(),
       currentUserId: null,
-      dayData: { timetableType: '通常', events: [], memo: null }
+      dayData: { timetableType: '通常', events: [], schoolEvents: [], memo: null }
     };
 
     const viewContainer = document.getElementById('view-container');
@@ -248,8 +249,9 @@
         if (docSnap.exists()) {
           appState.dayData = docSnap.data();
           if(!appState.dayData.events) appState.dayData.events = [];
+          if(!appState.dayData.schoolEvents) appState.dayData.schoolEvents = [];
         } else {
-          appState.dayData = { timetableType: '通常', events: [], memo: null };
+          appState.dayData = { timetableType: '通常', events: [], schoolEvents: [], memo: null };
         }
         renderView();
       } catch (e) {
@@ -268,6 +270,27 @@
       }
     }
 
+    // 指定した日付範囲（YYYY-MM-DD〜YYYY-MM-DD）の校内行事予定をまとめて取得する
+    // 月報から抽出した校内行事予定を月／週／年間の各ビューに反映するために使用
+    async function fetchSchoolEventsInRange(startStr, endStr) {
+      const result = {};
+      if (!appState.currentUserId) return result;
+      try {
+        const colRef = collection(db, "users", appState.currentUserId, "planner_data");
+        const q = query(colRef, where(documentId(), '>=', startStr), where(documentId(), '<=', endStr));
+        const snap = await getDocs(q);
+        snap.forEach(docSnap => {
+          const data = docSnap.data();
+          if (data.schoolEvents && data.schoolEvents.length > 0) {
+            result[docSnap.id] = data.schoolEvents;
+          }
+        });
+      } catch (e) {
+        console.error("Error fetching school events range:", e);
+      }
+      return result;
+    }
+
     // === 画面描画制御 ===
     document.querySelectorAll('.tab-btn').forEach(btn => {
       btn.addEventListener('click', (e) => {
@@ -280,26 +303,31 @@
       });
     });
 
-    function renderView(animationClass = '') {
+    async function renderView(animationClass = '') {
       viewContainer.className = `bg-white h-full rounded-xl shadow-lg border border-gray-200 overflow-y-auto flex flex-col ${animationClass}`;
-      
+
       switch (appState.currentView) {
-        case 'month': renderMonthView(); break;
-        case 'week': renderWeekView(); break;
+        case 'month': await renderMonthView(); break;
+        case 'week': await renderWeekView(); break;
         case 'day': renderDayView(); break;
+        case 'year': await renderYearView(); break;
         case 'class-matrix': renderClassMatrix(); break;
       }
-      
+
       if (animationClass) {
         setTimeout(() => viewContainer.classList.remove(animationClass), 300);
       }
     }
 
-    function renderMonthView() {
+    async function renderMonthView() {
       const year = appState.currentDate.getFullYear();
       const month = appState.currentDate.getMonth();
       const firstDay = new Date(year, month, 1).getDay();
       const daysInMonth = new Date(year, month + 1, 0).getDate();
+      const monthStr = String(month + 1).padStart(2, '0');
+      const startStr = `${year}-${monthStr}-01`;
+      const endStr = `${year}-${monthStr}-${String(daysInMonth).padStart(2, '0')}`;
+      const schoolEventsMap = await fetchSchoolEventsInRange(startStr, endStr);
 
       let html = `
         <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
@@ -310,31 +338,38 @@
         <div class="flex-1 grid grid-cols-7 gap-px bg-gray-200 border-b">
       `;
       ['日', '月', '火', '水', '木', '金', '土'].forEach(d => html += `<div class="bg-gray-100 text-center py-2 text-xs font-semibold text-gray-700">${d}</div>`);
-      
+
       for (let i = 0; i < firstDay; i++) html += `<div class="bg-gray-50 p-1 h-20 md:h-24"></div>`;
       for (let i = 1; i <= daysInMonth; i++) {
         const isToday = (i === new Date().getDate() && month === new Date().getMonth() && year === new Date().getFullYear());
         const dateStyle = isToday ? "bg-blue-600 text-white rounded-full w-6 h-6 inline-flex items-center justify-center" : "text-gray-700";
+        const dateStr = `${year}-${monthStr}-${String(i).padStart(2, '0')}`;
+        const dayEvents = schoolEventsMap[dateStr] || [];
+        const previewHtml = dayEvents.slice(0, 2).map(ev => `<div class="text-[10px] leading-tight bg-red-100 text-red-700 rounded px-1 truncate mt-0.5">${ev}</div>`).join('');
+        const moreHtml = dayEvents.length > 2 ? `<div class="text-[9px] text-gray-400 mt-0.5">+${dayEvents.length - 2}件</div>` : '';
         html += `
-          <div data-action="go-day" data-day="${i}" class="bg-white p-1 h-20 md:h-24 flex flex-col border-b border-r cursor-pointer hover:bg-blue-50">
+          <div data-action="go-day" data-date="${dateStr}" class="bg-white p-1 h-20 md:h-24 flex flex-col border-b border-r cursor-pointer hover:bg-blue-50 overflow-hidden">
             <div class="text-right text-xs"><span class="${dateStyle} font-semibold">${i}</span></div>
+            <div class="flex-1 overflow-hidden">${previewHtml}${moreHtml}</div>
           </div>
         `;
       }
       const totalCells = firstDay + daysInMonth;
       const trailingCells = totalCells % 7 === 0 ? 0 : 7 - (totalCells % 7);
       for (let i = 0; i < trailingCells; i++) html += `<div class="bg-gray-50 p-1 h-20 md:h-24"></div>`;
-      
+
       viewContainer.innerHTML = html + `</div>`;
     }
 
-    function renderWeekView() {
+    async function renderWeekView() {
       const d = new Date(appState.currentDate);
       d.setDate(d.getDate() - d.getDay());
       const startStr = `${d.getMonth() + 1}/${d.getDate()}`;
       const endDate = new Date(d);
       endDate.setDate(d.getDate() + 6);
       const endStr = `${endDate.getMonth() + 1}/${endDate.getDate()}`;
+
+      const schoolEventsMap = await fetchSchoolEventsInRange(formatDateStr(d), formatDateStr(endDate));
 
       let html = `
         <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
@@ -349,17 +384,22 @@
         const currentLoopDate = new Date(d);
         currentLoopDate.setDate(d.getDate() + i);
         const dayNum = currentLoopDate.getDate();
+        const dateStr = formatDateStr(currentLoopDate);
         const isToday = (currentLoopDate.toDateString() === new Date().toDateString());
         const bgClass = isToday ? "bg-blue-50" : "bg-white";
+        const dayEvents = schoolEventsMap[dateStr] || [];
+        const eventsHtml = dayEvents.length > 0
+          ? dayEvents.map(ev => `<div class="text-xs bg-red-50 text-red-700 rounded px-1 mb-0.5 truncate">🏫 ${ev}</div>`).join('')
+          : `<div class="text-xs text-gray-400 mt-1">タップして詳細</div>`;
 
         html += `
-          <div data-action="go-day" data-day="${dayNum}" data-month="${currentLoopDate.getMonth()}" class="${bgClass} flex-1 p-2 flex border-b cursor-pointer hover:bg-gray-50">
-            <div class="w-12 text-center border-r pr-2 mr-2">
+          <div data-action="go-day" data-date="${dateStr}" class="${bgClass} flex-1 p-2 flex border-b cursor-pointer hover:bg-gray-50">
+            <div class="w-12 text-center border-r pr-2 mr-2 flex-shrink-0">
               <div class="text-xs text-gray-500 font-bold">${dayNames[i]}</div>
               <div class="text-lg font-bold text-gray-800">${dayNum}</div>
             </div>
-            <div class="flex-1 text-sm text-gray-600">
-               <div class="text-xs text-gray-400 mt-1">タップして詳細</div>
+            <div class="flex-1 text-sm text-gray-600 overflow-hidden">
+               ${eventsHtml}
             </div>
           </div>
         `;
@@ -371,7 +411,17 @@
       const dateColor = (appState.dayData.timetableType !== '通常') ? 'text-red-600 border-red-600 bg-red-50' : 'text-gray-800 border-gray-300';
       const dateStrDisplay = `${appState.currentDate.getFullYear()}年${appState.currentDate.getMonth() + 1}月${appState.currentDate.getDate()}日`;
 
-      let eventsHtml = appState.dayData.events.length > 0 
+      const schoolEvents = appState.dayData.schoolEvents || [];
+      let schoolEventsHtml = schoolEvents.length > 0
+        ? schoolEvents.map((ev, idx) => `
+            <li class="p-3 bg-red-50 rounded border border-red-100 mb-2 flex justify-between items-center shadow-sm">
+              <span class="flex-1 text-red-900 font-medium">🏫 ${ev}</span>
+              <button data-action="delete-school" data-index="${idx}" class="text-red-500 bg-white border border-red-200 px-2 py-1 rounded text-xs font-bold flex-shrink-0">削除</button>
+            </li>
+          `).join('')
+        : '<p class="text-gray-400 italic mb-2 text-sm">校内行事予定はありません</p>';
+
+      let eventsHtml = appState.dayData.events.length > 0
         ? appState.dayData.events.map((e, idx) => `
             <li class="p-3 bg-blue-50 rounded border border-blue-100 mb-2 flex justify-between items-center shadow-sm">
               <span class="flex-1 text-blue-900 font-medium">${e.text || e}</span>
@@ -400,12 +450,60 @@
             <span class="text-sm border px-3 py-1 rounded-full font-bold shadow-sm ${dateColor}">${appState.dayData.timetableType}日課</span>
             <button id="btn-open-memo" class="bg-yellow-100 text-yellow-800 px-4 py-2 rounded-lg shadow font-bold">✍️ 手書きメモ</button>
           </div>
+          <h3 class="font-bold text-gray-700 mb-3 border-l-4 border-red-500 pl-2">校内行事予定</h3>
+          <ul class="mb-6">${schoolEventsHtml}</ul>
           <h3 class="font-bold text-gray-700 mb-3 border-l-4 border-blue-500 pl-2">本日の予定</h3>
           <ul class="mb-6">${eventsHtml}</ul>
           ${appState.dayData.memo ? `<h3 class="font-bold text-gray-700 mt-6 mb-3 border-l-4 border-yellow-500 pl-2">保存されたメモ</h3><img src="${appState.dayData.memo}" class="border rounded-lg bg-yellow-50 w-full shadow-sm" />` : ''}
         </div>
       `;
       document.getElementById('btn-open-memo').addEventListener('click', openCanvasModal);
+    }
+
+    async function renderYearView() {
+      const year = appState.currentDate.getFullYear();
+      const schoolEventsMap = await fetchSchoolEventsInRange(`${year}-01-01`, `${year}-12-31`);
+
+      const monthGroups = Array.from({ length: 12 }, () => []);
+      Object.keys(schoolEventsMap).sort().forEach(dateStr => {
+        const [, m, day] = dateStr.split('-').map(Number);
+        schoolEventsMap[dateStr].forEach(text => {
+          monthGroups[m - 1].push({ day, text, dateStr });
+        });
+      });
+
+      let html = `
+        <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
+          <button data-action="prev-year" class="px-3 py-1 bg-white border rounded shadow-sm font-bold text-gray-600">＜</button>
+          <div class="font-bold text-lg cursor-pointer" data-action="today">${year}年 年間行事予定</div>
+          <button data-action="next-year" class="px-3 py-1 bg-white border rounded shadow-sm font-bold text-gray-600">＞</button>
+        </div>
+        <div class="flex-1 overflow-y-auto p-3 space-y-4">
+      `;
+
+      const hasAny = monthGroups.some(arr => arr.length > 0);
+      if (!hasAny) {
+        html += `<p class="text-gray-400 italic text-center py-10">校内行事予定が登録されていません。<br>「📸」ボタンから月報を取り込んでください。</p>`;
+      } else {
+        monthGroups.forEach((items, idx) => {
+          if (items.length === 0) return;
+          html += `
+            <div class="border rounded-lg overflow-hidden">
+              <div class="bg-gray-100 px-3 py-2 font-bold text-gray-700 border-b">${idx + 1}月</div>
+              <ul>
+                ${items.map(it => `
+                  <li data-action="go-day" data-date="${it.dateStr}" class="flex px-3 py-2 border-b last:border-b-0 hover:bg-red-50 cursor-pointer items-center">
+                    <span class="w-12 text-center font-bold text-red-600 flex-shrink-0">${it.day}日</span>
+                    <span class="flex-1 text-sm text-gray-800">🏫 ${it.text}</span>
+                  </li>
+                `).join('')}
+              </ul>
+            </div>
+          `;
+        });
+      }
+      html += `</div>`;
+      viewContainer.innerHTML = html;
     }
 
     function renderClassMatrix() {
@@ -426,11 +524,12 @@
         else if (type === 'next-week') { appState.currentDate.setDate(appState.currentDate.getDate() + 7); renderView('slide-enter-right'); }
         else if (type === 'prev-day') { appState.currentDate.setDate(appState.currentDate.getDate() - 1); await loadDataForCurrentDate(); }
         else if (type === 'next-day') { appState.currentDate.setDate(appState.currentDate.getDate() + 1); await loadDataForCurrentDate(); }
+        else if (type === 'prev-year') { appState.currentDate.setFullYear(appState.currentDate.getFullYear() - 1); renderView('slide-enter-left'); }
+        else if (type === 'next-year') { appState.currentDate.setFullYear(appState.currentDate.getFullYear() + 1); renderView('slide-enter-right'); }
         else if (type === 'go-day') {
-          const day = parseInt(action.dataset.day);
-          const month = action.dataset.month ? parseInt(action.dataset.month) : appState.currentDate.getMonth();
-          appState.currentDate.setMonth(month); appState.currentDate.setDate(day);
-          appState.currentView = 'day'; 
+          const [y, m, dd] = action.dataset.date.split('-').map(Number);
+          appState.currentDate = new Date(y, m - 1, dd);
+          appState.currentView = 'day';
           document.querySelectorAll('.tab-btn').forEach(t => t.classList.replace('bg-white', 'text-gray-300'));
           document.querySelectorAll('.tab-btn').forEach(t => t.classList.remove('text-gray-800', 'font-bold'));
           document.querySelector('[data-view="day"]').classList.add('bg-white', 'text-gray-800', 'font-bold');
@@ -441,6 +540,7 @@
       if (appState.currentView === 'day') {
         const editBtn = e.target.closest('button[data-action="edit"]');
         const delBtn = e.target.closest('button[data-action="delete"]');
+        const delSchoolBtn = e.target.closest('button[data-action="delete-school"]');
         const addBtn = e.target.closest('#btn-add-event');
         if (editBtn) {
           const idx = parseInt(editBtn.dataset.index);
@@ -451,6 +551,12 @@
         } else if (delBtn) {
           if (confirm("この予定を削除しますか？")) {
             appState.dayData.events.splice(parseInt(delBtn.dataset.index), 1);
+            await saveCurrentDayData();
+            renderView();
+          }
+        } else if (delSchoolBtn) {
+          if (confirm("この校内行事予定を削除しますか？")) {
+            appState.dayData.schoolEvents.splice(parseInt(delSchoolBtn.dataset.index), 1);
             await saveCurrentDayData();
             renderView();
           }
@@ -508,22 +614,25 @@
       const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${apiKey}`;
       const prompt = `
         あなたは優秀な中学校のスケジュールアシスタントです。
-        アップロードされたファイルは、中学校の週報または月間予定表（PDFまたは画像）です。
+        アップロードされたファイルは、中学校の月報（月間行事予定表）または週報（PDFまたは画像）です。
+        月報は日付ごと・週ごとにマス目やカレンダー形式、あるいは表形式で校内行事予定が並んでいることが多く、レイアウトが崩れて見えても、日付と行事名の対応関係を丁寧に読み取ってください。
         このファイルから以下の情報を抽出し、必ず指定されたJSON配列フォーマットで出力してください。
 
         【抽出する対象】
-        1. 学校全体の予定や特別な日課（短縮日課、テスト、行事など）
-        2. 「石川」先生に関連する予定（会議、出張、部活動など）
+        1. 校内行事予定：月報に記載されている学校全体の行事・特別な日課（例: 始業式、参観日、定期テスト、避難訓練、生徒総会、短縮日課など）。月報からはこれを最優先かつ網羅的に抽出してください。
+        2. 「石川」先生に関連する個人の予定（会議、出張、部活動など）
         3. 時間割の変更情報（例: 月1を火2へ変更、授業のカット等）
 
         【重要なルール】
         ・推測で予定を作らないでください。
         ・ファイルに記載されていない日付のデータは出力しないでください。
+        ・資料に年度・月の記載がある場合はそれをもとにYYYY-MM-DD形式の日付へ正しく変換してください。
+        ・同じ日に複数の行事がある場合は、それぞれを別々の配列要素として出力してください。
         ・Markdownのバッククォート（\`\`\`json など）は絶対に含めず、純粋なJSON配列のみを出力してください。
 
         【出力フォーマット】
         [
-          {"date": "YYYY-MM-DD", "type": "学校", "text": "全校集会（短縮日課）"},
+          {"date": "YYYY-MM-DD", "type": "行事", "text": "始業式（短縮日課）"},
           {"date": "YYYY-MM-DD", "type": "石川", "text": "14:00 教科部会"},
           {"date": "YYYY-MM-DD", "type": "変更", "text": "3限の授業カット"}
         ]
@@ -591,15 +700,15 @@
         } else {
           list.innerHTML = extractedEvents.map(ev => {
             let badgeClass = "bg-gray-100 text-gray-700";
-            if (ev.type === "学校") badgeClass = "bg-red-100 text-red-700";
+            if (ev.type === "行事" || ev.type === "学校") badgeClass = "bg-red-100 text-red-700";
             if (ev.type === "石川") badgeClass = "bg-blue-100 text-blue-700";
             if (ev.type === "変更") badgeClass = "bg-yellow-100 text-yellow-700";
 
             return `
-              <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${ev.date}">
+              <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${ev.date}" data-type="${ev.type}">
                 <div class="flex justify-between items-center mb-1">
                   <span class="font-bold text-blue-700 text-sm">${ev.date}</span>
-                  <span class="${badgeClass} text-xs px-2 py-0.5 rounded">${ev.type}</span>
+                  <span class="${badgeClass} text-xs px-2 py-0.5 rounded">${ev.type === "学校" ? "行事" : ev.type}</span>
                 </div>
                 <input type="text" value="${ev.text}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
               </li>
@@ -630,21 +739,28 @@
       const updates = {};
       items.forEach(item => {
         const dateStr = item.dataset.date;
+        const type = item.dataset.type;
         const val = item.querySelector('.scan-val').value;
-        if (!updates[dateStr]) updates[dateStr] = [];
-        updates[dateStr].push(val);
+        if (!updates[dateStr]) updates[dateStr] = { schoolEvents: [], events: [] };
+        if (type === '行事' || type === '学校') {
+          updates[dateStr].schoolEvents.push(val);
+        } else {
+          updates[dateStr].events.push(val);
+        }
       });
 
-      for (const [dateStr, newEvents] of Object.entries(updates)) {
+      for (const [dateStr, newData] of Object.entries(updates)) {
         const docRef = doc(db, "users", appState.currentUserId, "planner_data", dateStr);
         const docSnap = await getDoc(docRef);
-        let data = docSnap.exists() ? docSnap.data() : { timetableType: '通常', events: [], memo: null };
+        let data = docSnap.exists() ? docSnap.data() : { timetableType: '通常', events: [], schoolEvents: [], memo: null };
         if(!data.events) data.events = [];
-        data.events.push(...newEvents);
-        if (newEvents.some(e => e.includes('短縮'))) data.timetableType = '短縮';
+        if(!data.schoolEvents) data.schoolEvents = [];
+        data.events.push(...newData.events);
+        data.schoolEvents.push(...newData.schoolEvents);
+        if ([...newData.events, ...newData.schoolEvents].some(e => e.includes('短縮'))) data.timetableType = '短縮';
         await setDoc(docRef, data);
       }
-      alert("抽出した予定を一括でカレンダーに反映しました！");
+      alert("校内行事予定・予定を一括でカレンダーに反映しました！月・週・日・年間予定に反映されます。");
       await loadDataForCurrentDate();
       document.getElementById('scan-modal').classList.add('hidden');
       document.getElementById('file-upload').value = ''; // 次回のためにリセット
