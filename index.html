@@ -670,13 +670,10 @@
         ・資料に年度・月の記載がある場合はそれをもとにYYYY-MM-DD形式の日付へ正しく変換してください。
         ・同じ日に複数の行事がある場合は、それぞれを別々の配列要素として出力してください。
         ・Markdownのバッククォート（\`\`\`json など）は絶対に含めず、純粋なJSON配列のみを出力してください。
+        ・出力トークンを節約するため、改行・インデント・余分な空白を一切入れず、必ず1行の圧縮されたJSON配列として出力してください。
 
-        【出力フォーマット】
-        [
-          {"date": "YYYY-MM-DD", "type": "行事", "text": "始業式（短縮日課）"},
-          {"date": "YYYY-MM-DD", "type": "石川", "text": "14:00 教科部会"},
-          {"date": "YYYY-MM-DD", "type": "変更", "text": "3限の授業カット"}
-        ]
+        【出力フォーマット（実際は改行を入れず1行で出力すること）】
+        [{"date": "YYYY-MM-DD", "type": "行事", "text": "始業式（短縮日課）"}, {"date": "YYYY-MM-DD", "type": "石川", "text": "14:00 教科部会"}, {"date": "YYYY-MM-DD", "type": "変更", "text": "3限の授業カット"}]
       `;
 
       const requestBody = {
@@ -688,26 +685,36 @@
         }],
         generationConfig: {
           responseMimeType: "application/json",
-          temperature: 0.1
+          temperature: 0.1,
+          maxOutputTokens: 65536
         }
       };
 
-      async function callWithModel(modelId) {
+      async function callWithModel(modelId, body) {
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
         return fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(requestBody)
+          body: JSON.stringify(body)
         });
       }
 
       let modelId = await pickAvailableGeminiModel(apiKey);
-      let response = await callWithModel(modelId);
+      let response = await callWithModel(modelId, requestBody);
 
       // キャッシュしていたモデルが提供終了になっていた場合、最新の一覧を取得し直して1度だけ再試行
       if (!response.ok && response.status === 404) {
         modelId = await pickAvailableGeminiModel(apiKey, true);
-        response = await callWithModel(modelId);
+        response = await callWithModel(modelId, requestBody);
+      }
+
+      // maxOutputTokensの値がモデルの上限を超えて拒否された場合、指定なし（モデルの既定値）で再試行
+      if (!response.ok && response.status === 400) {
+        const preErrText = await response.clone().text();
+        if (preErrText.includes("max_tokens") || preErrText.includes("maxOutputTokens")) {
+          const fallbackBody = { ...requestBody, generationConfig: { responseMimeType: "application/json", temperature: 0.1 } };
+          response = await callWithModel(modelId, fallbackBody);
+        }
       }
 
       if (!response.ok) {
@@ -732,7 +739,24 @@
       }
 
       const data = await response.json();
-      return JSON.parse(data.candidates[0].content.parts[0].text);
+      const candidate = data.candidates && data.candidates[0];
+      const resultText = candidate && candidate.content && candidate.content.parts && candidate.content.parts[0] && candidate.content.parts[0].text;
+
+      if (!resultText) {
+        if (candidate && candidate.finishReason === 'MAX_TOKENS') {
+          throw new Error("月報の行事予定が多く、AIの応答が出力上限に達して途中で切れました。ファイルのページ数を減らすか、複数回に分けてアップロードしてください。");
+        }
+        throw new Error("AIから解析結果を取得できませんでした。もう一度お試しください。");
+      }
+
+      try {
+        return JSON.parse(resultText);
+      } catch (e) {
+        if (candidate.finishReason === 'MAX_TOKENS') {
+          throw new Error("月報の行事予定が多く、AIの応答が出力上限に達して途中で切れました。ファイルのページ数を減らすか、複数回に分けてアップロードしてください。");
+        }
+        throw new Error("AIの応答をJSONとして解析できませんでした。もう一度お試しいただくか、ファイルの解像度・ページ数を見直してください。");
+      }
     }
 
     document.getElementById('file-upload').addEventListener('change', async (e) => {
