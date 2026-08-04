@@ -121,7 +121,7 @@
   <div id="scan-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
     <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6 flex flex-col max-h-full">
       <h2 class="text-xl font-bold mb-4 border-b pb-2">週報・月報から予定を追加</h2>
-      <p class="text-xs text-gray-500 mb-4">月報（月間行事予定表）や週報のPDF・画像をアップロードすると、Gemini 2.5 Flashが校内行事予定や「石川」先生の予定などを解析して抽出します。抽出された校内行事予定は月・週・日・年間予定すべてに反映されます。</p>
+      <p class="text-xs text-gray-500 mb-4">月報（月間行事予定表）や週報のPDF・画像をアップロードすると、Gemini AIが校内行事予定や「石川」先生の予定などを解析して抽出します。抽出された校内行事予定は月・週・日・年間予定すべてに反映されます。</p>
       <input type="file" id="file-upload" accept="image/*,application/pdf" class="mb-4 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700" />
       
       <!-- エラー表示エリア -->
@@ -581,7 +581,7 @@
       document.getElementById('event-modal').classList.add('hidden');
     });
 
-    // === Gemini API (2.5 Flash) 解析・連携機能 ===
+    // === Gemini API 解析・連携機能 ===
     document.getElementById('btn-scan').addEventListener('click', () => {
       document.getElementById('scan-modal').classList.remove('hidden');
       document.getElementById('scan-result-area').classList.add('hidden');
@@ -604,6 +604,48 @@
       });
     }
 
+    // Geminiのモデルは提供終了・入れ替わりが頻繁にあるため、モデル名を固定せず
+    // 利用可能なモデル一覧から動的に選択する（GoogleがモデルをEOLにしても壊れないようにするため）
+    const GEMINI_MODEL_CACHE_KEY = 'gemini_model_cache';
+    const GEMINI_MODEL_CACHE_TTL = 24 * 60 * 60 * 1000; // 24時間
+
+    async function pickAvailableGeminiModel(apiKey, forceRefresh = false) {
+      if (!forceRefresh) {
+        try {
+          const cached = JSON.parse(localStorage.getItem(GEMINI_MODEL_CACHE_KEY) || 'null');
+          if (cached && cached.apiKey === apiKey && (Date.now() - cached.timestamp) < GEMINI_MODEL_CACHE_TTL) {
+            return cached.model;
+          }
+        } catch (e) { /* キャッシュ破損時は無視して再取得 */ }
+      }
+
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+      if (!res.ok) {
+        if (res.status === 400) {
+          throw new Error("APIキーが無効です。設定から正しいキーを登録し直してください。");
+        }
+        throw new Error("利用可能なAIモデルの取得に失敗しました。しばらくしてから再度お試しください。");
+      }
+      const data = await res.json();
+      const candidates = (data.models || []).filter(m =>
+        m.name && m.name.includes('gemini') &&
+        Array.isArray(m.supportedGenerationMethods) && m.supportedGenerationMethods.includes('generateContent') &&
+        !/embedding|aqa|vision|tts|image-generation|preview|exp/i.test(m.name)
+      );
+      if (candidates.length === 0) {
+        throw new Error("利用可能なGeminiモデルが見つかりませんでした。Google AI Studioでご利用のAPIキーの状態をご確認ください。");
+      }
+      // 無料枠でも動きやすいFlash系（liteは精度が落ちるため優先度を下げる）を優先し、同カテゴリ内ではバージョンの新しいものを選ぶ
+      const byNewest = (list) => list.sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true }))[0];
+      const flashModels = candidates.filter(m => /flash/i.test(m.name) && !/lite/i.test(m.name));
+      const flashLiteModels = candidates.filter(m => /flash/i.test(m.name) && /lite/i.test(m.name));
+      const chosen = byNewest(flashModels.length > 0 ? flashModels : (flashLiteModels.length > 0 ? flashLiteModels : candidates));
+      const modelId = chosen.name.replace(/^models\//, '');
+
+      localStorage.setItem(GEMINI_MODEL_CACHE_KEY, JSON.stringify({ apiKey, model: modelId, timestamp: Date.now() }));
+      return modelId;
+    }
+
     async function callGeminiAPI(base64Data, mimeType) {
       // ローカルストレージからAPIキーを取得
       const apiKey = localStorage.getItem('gemini_api_key');
@@ -611,7 +653,6 @@
         throw new Error("APIキーが設定されていません。右上の「⚙️設定」ボタンからキーを登録してください。");
       }
 
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
       const prompt = `
         あなたは優秀な中学校のスケジュールアシスタントです。
         アップロードされたファイルは、中学校の月報（月間行事予定表）または週報（PDFまたは画像）です。
@@ -651,11 +692,23 @@
         }
       };
 
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
-      });
+      async function callWithModel(modelId) {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelId}:generateContent?key=${apiKey}`;
+        return fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody)
+        });
+      }
+
+      let modelId = await pickAvailableGeminiModel(apiKey);
+      let response = await callWithModel(modelId);
+
+      // キャッシュしていたモデルが提供終了になっていた場合、最新の一覧を取得し直して1度だけ再試行
+      if (!response.ok && response.status === 404) {
+        modelId = await pickAvailableGeminiModel(apiKey, true);
+        response = await callWithModel(modelId);
+      }
 
       if (!response.ok) {
         const errText = await response.text();
@@ -668,8 +721,8 @@
           throw new Error("ファイルサイズが大きすぎます。PDFのページ数を減らすか、画像にしてアップロードしてください。");
         }
         // 利用モデルがAPIキーの利用可能枠で提供終了・未対応の場合
-        if (response.status === 404 && errText.includes("is not found for API version")) {
-          throw new Error("現在使用しているAIモデルがこのAPIキーでは利用できません。Google AI Studioで有効なAPIキーを再発行し、設定から登録し直してください。");
+        if (response.status === 404) {
+          throw new Error("現在利用できるAIモデルが見つかりませんでした。Google AI Studioで有効なAPIキーの状態をご確認のうえ、再度お試しください。");
         }
         // 無料枠の利用上限（クォータ）を超えた場合
         if (response.status === 429 || errText.includes("RESOURCE_EXHAUSTED") || errText.includes("exceeded your current quota")) {
