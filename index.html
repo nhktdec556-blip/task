@@ -166,6 +166,26 @@
     </div>
   </div>
 
+  <!-- 授業時数カウント専用：長期休業期間の設定モーダル -->
+  <div id="vacation-settings-modal" class="hidden fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6 flex flex-col max-h-full">
+      <h2 class="text-xl font-bold mb-4 border-b pb-2">長期休業期間の設定</h2>
+      <p class="text-xs text-gray-500 mb-4">夏休み・冬休み・春休みなど授業が行われない期間を登録すると、月報に振替の記載がない日でも、授業時数カウントでその期間を0時間として正しく計算します。</p>
+      <div id="vacation-list" class="mb-4 space-y-2 max-h-40 overflow-y-auto"></div>
+      <div class="border-t pt-3 space-y-2">
+        <div class="flex space-x-2">
+          <input type="date" id="vacation-start-input" class="flex-1 border border-gray-300 rounded p-2 text-sm bg-gray-50" />
+          <input type="date" id="vacation-end-input" class="flex-1 border border-gray-300 rounded p-2 text-sm bg-gray-50" />
+        </div>
+        <input type="text" id="vacation-label-input" placeholder="例: 夏季休業" class="w-full border border-gray-300 rounded p-2 text-sm bg-gray-50" />
+        <button id="btn-add-vacation" class="w-full py-2 bg-teal-600 hover:bg-teal-500 text-white rounded font-semibold">追加</button>
+      </div>
+      <div class="flex justify-end mt-4">
+        <button id="btn-close-vacation-settings" class="px-4 py-2 bg-gray-200 rounded text-gray-700 font-semibold">閉じる</button>
+      </div>
+    </div>
+  </div>
+
   <!-- 手書きメモモーダル -->
   <div id="canvas-modal" class="hidden fixed inset-0 bg-black/80 z-50 flex items-center justify-center">
     <div class="bg-white rounded-lg p-2 w-[95%] h-[90%] flex flex-col">
@@ -207,7 +227,8 @@
       currentDate: new Date(),
       currentUserId: null,
       dayData: { timetableType: '通常', events: [], schoolEvents: [], memo: null },
-      weeklyTimetable: {}
+      weeklyTimetable: {},
+      vacations: []
     };
 
     const viewContainer = document.getElementById('view-container');
@@ -219,6 +240,9 @@
     let unsubscribeDayListener = null;
     // 石川先生の週間時間割（曜日+限→クラス・教科）のリスナー。日/週/週授業/時数の各ビューで共有する
     let unsubscribeTimetableListener = null;
+    // 長期休業期間（夏休み等）のリスナー。授業時数カウントで、月報に記載のない休業日を
+    // 通常授業日として誤カウントしないようにするために使用する
+    let unsubscribeVacationsListener = null;
 
     function subscribeWeeklyTimetable() {
       if (unsubscribeTimetableListener) {
@@ -232,6 +256,25 @@
       }, (e) => {
         console.error("Error loading weekly timetable:", e);
       });
+    }
+
+    function subscribeVacations() {
+      if (unsubscribeVacationsListener) {
+        unsubscribeVacationsListener();
+        unsubscribeVacationsListener = null;
+      }
+      const docRef = doc(db, "users", appState.currentUserId, "settings", "school_calendar");
+      unsubscribeVacationsListener = onSnapshot(docRef, (docSnap) => {
+        appState.vacations = (docSnap.exists() && docSnap.data().vacations) ? docSnap.data().vacations : [];
+        renderView();
+      }, (e) => {
+        console.error("Error loading vacations:", e);
+      });
+    }
+
+    // 指定した日付(YYYY-MM-DD)が、登録済みの長期休業期間のいずれかに含まれるか判定する
+    function isVacationDate(dateStr, vacations) {
+      return (vacations || []).some(v => v.start <= dateStr && dateStr <= v.end);
     }
 
     function formatDateStr(dateObj) {
@@ -269,10 +312,12 @@
         loginScreen.classList.add('hidden');
         loadDataForCurrentDate();
         subscribeWeeklyTimetable();
+        subscribeVacations();
       } else {
         appState.currentUserId = null;
         if (unsubscribeDayListener) { unsubscribeDayListener(); unsubscribeDayListener = null; }
         if (unsubscribeTimetableListener) { unsubscribeTimetableListener(); unsubscribeTimetableListener = null; }
+        if (unsubscribeVacationsListener) { unsubscribeVacationsListener(); unsubscribeVacationsListener = null; }
         loginScreen.classList.remove('hidden');
       }
     });
@@ -724,7 +769,7 @@
     // 週間時間割(石川先生の社会科のコマ)から、クラスごと・月ごとの授業時数を実日付ベースで集計する。
     // 月報から振替（例:「火1」）や特別スケジュール（テスト・学活等）が抽出できている日付はそれを優先し、
     // 抽出できていない日付はその日の実際の曜日どおりに通常授業が行われるものとして概算する。
-    function computeLessonCounts(timetable, months, overridesMap) {
+    function computeLessonCounts(timetable, months, overridesMap, vacations) {
       const naturalMap = {}; // `${曜日}-${限}` -> クラスコード（社会科のみ）
       const gradeToClassCodes = {};
       Object.entries(timetable).forEach(([key, text]) => {
@@ -753,6 +798,7 @@
           const realWeekday = JP_WEEKDAYS[dateObj.getDay()];
           if (!['月', '火', '水', '木', '金'].includes(realWeekday)) continue; // 土日は対象外
           const dateStr = `${ym.year}-${String(ym.month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+          if (isVacationDate(dateStr, vacations)) continue; // 長期休業期間（夏休み等）は授業なしとして扱う
           const dayOverrides = overridesMap[dateStr];
 
           grades.forEach(grade => {
@@ -782,17 +828,25 @@
       const lastMonth = months[months.length - 1];
       const endStr = `${lastMonth.year}-${String(lastMonth.month + 1).padStart(2, '0')}-31`;
       const overridesMap = await fetchPeriodOverridesInRange(startStr, endStr);
-      const { classCodes, counts } = computeLessonCounts(appState.weeklyTimetable || {}, months, overridesMap);
-      // 振替を反映しなかった場合（曜日パターンのみの概算）も計算し、実際に差が出ているかを
-      // 目視で確認できるようにする
-      const { counts: baselineCounts } = computeLessonCounts(appState.weeklyTimetable || {}, months, {});
+      const vacations = appState.vacations || [];
+      const { classCodes, counts } = computeLessonCounts(appState.weeklyTimetable || {}, months, overridesMap, vacations);
+      // 振替を反映しなかった場合（曜日パターンのみの概算。ただし長期休業は反映）も計算し、
+      // 実際に差が出ているかを目視で確認できるようにする
+      const { counts: baselineCounts } = computeLessonCounts(appState.weeklyTimetable || {}, months, {}, vacations);
 
       let html = `
-        <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
+        <div class="p-3 bg-gray-50 border-b flex justify-between items-center flex-wrap gap-2">
           <div class="font-bold text-lg">授業時数カウント（社会科・今月〜3月）</div>
-          <button id="btn-open-swap-scan" class="bg-purple-600 hover:bg-purple-500 text-white text-xs px-3 py-1.5 rounded shadow font-bold whitespace-nowrap">📄 振替を取り込む</button>
+          <div class="flex space-x-2">
+            <button id="btn-open-vacation-settings" class="bg-teal-600 hover:bg-teal-500 text-white text-xs px-3 py-1.5 rounded shadow font-bold whitespace-nowrap">🏖️ 長期休業を設定</button>
+            <button id="btn-open-swap-scan" class="bg-purple-600 hover:bg-purple-500 text-white text-xs px-3 py-1.5 rounded shadow font-bold whitespace-nowrap">📄 振替を取り込む</button>
+          </div>
         </div>
       `;
+
+      if (vacations.length > 0) {
+        html += `<p class="text-xs text-teal-700 px-3 pt-2">登録済みの長期休業期間: ${vacations.map(v => `${v.label || '休業'}（${v.start}〜${v.end}）`).join('、')}</p>`;
+      }
 
       // 実際に取り込めている振替データを目視で確認できるようにする（反映されているのに
       // 数値が変わらない場合の切り分け用: 期間外の日付になっていないか等がすぐ分かる）
@@ -860,6 +914,7 @@
 
       viewContainer.innerHTML = html;
       document.getElementById('btn-open-swap-scan').addEventListener('click', openSwapScanModal);
+      document.getElementById('btn-open-vacation-settings').addEventListener('click', openVacationSettingsModal);
     }
 
     // === ナビゲーション & クリックイベント ===
@@ -1365,6 +1420,62 @@
       await renderView();
       document.getElementById('swap-scan-modal').classList.add('hidden');
       document.getElementById('swap-file-upload').value = '';
+    });
+
+    // === 授業時数カウント専用：長期休業期間の設定 ===
+    async function saveVacations(vacations) {
+      const docRef = doc(db, "users", appState.currentUserId, "settings", "school_calendar");
+      await setDoc(docRef, { vacations });
+    }
+
+    function renderVacationList() {
+      const list = document.getElementById('vacation-list');
+      const vacations = appState.vacations || [];
+      if (vacations.length === 0) {
+        list.innerHTML = `<p class="text-gray-400 italic text-xs text-center py-2">登録されている休業期間はありません</p>`;
+      } else {
+        list.innerHTML = vacations.map((v, idx) => `
+          <div class="flex justify-between items-center bg-gray-50 border rounded p-2 text-sm">
+            <span>${v.label || '休業'}（${v.start}〜${v.end}）</span>
+            <button type="button" class="vacation-delete text-red-500 font-bold px-2" data-index="${idx}">削除</button>
+          </div>
+        `).join('');
+      }
+    }
+
+    function openVacationSettingsModal() {
+      renderVacationList();
+      document.getElementById('vacation-settings-modal').classList.remove('hidden');
+    }
+
+    document.getElementById('btn-close-vacation-settings').addEventListener('click', () => {
+      document.getElementById('vacation-settings-modal').classList.add('hidden');
+    });
+
+    document.getElementById('vacation-list').addEventListener('click', async (e) => {
+      const btn = e.target.closest('.vacation-delete');
+      if (!btn) return;
+      const idx = parseInt(btn.dataset.index);
+      const vacations = [...(appState.vacations || [])];
+      vacations.splice(idx, 1);
+      appState.vacations = vacations;
+      renderVacationList();
+      await saveVacations(vacations);
+    });
+
+    document.getElementById('btn-add-vacation').addEventListener('click', async () => {
+      const start = document.getElementById('vacation-start-input').value;
+      const end = document.getElementById('vacation-end-input').value;
+      const label = document.getElementById('vacation-label-input').value.trim();
+      if (!start || !end) return alert("開始日と終了日を入力してください");
+      if (start > end) return alert("開始日は終了日より前の日付にしてください");
+      const vacations = [...(appState.vacations || []), { start, end, label }];
+      appState.vacations = vacations;
+      renderVacationList();
+      document.getElementById('vacation-start-input').value = '';
+      document.getElementById('vacation-end-input').value = '';
+      document.getElementById('vacation-label-input').value = '';
+      await saveVacations(vacations);
     });
 
     // === キャンバス (メモ機能) ===
