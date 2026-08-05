@@ -699,6 +699,13 @@
 
       let bodyHtml;
       if (tab === 'class') {
+        // classScheduleが未取得（振替データからまだ一度も反映していない）場合は、
+        // 振替データからの計算結果をその場で表示する（別途取り込み直す必要はない）。
+        // 編集・削除すると、この時点でappState.dayDataに反映されて保存対象になる。
+        if (appState.dayData.classSchedule === undefined) {
+          appState.dayData.classSchedule = resolveActualClasses(appState.currentDate, appState.weeklyTimetable || {}, appState.dayData.periodOverrides, appState.vacations)
+            .map(c => `${c.period}限 ${c.text}`);
+        }
         const classSchedule = appState.dayData.classSchedule || [];
         const listHtml = renderEditableList(classSchedule, 'classSchedule', {
           bgClass: 'bg-indigo-50', borderClass: 'border-indigo-100', textClass: 'text-indigo-900',
