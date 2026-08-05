@@ -783,6 +783,9 @@
       const endStr = `${lastMonth.year}-${String(lastMonth.month + 1).padStart(2, '0')}-31`;
       const overridesMap = await fetchPeriodOverridesInRange(startStr, endStr);
       const { classCodes, counts } = computeLessonCounts(appState.weeklyTimetable || {}, months, overridesMap);
+      // 振替を反映しなかった場合（曜日パターンのみの概算）も計算し、実際に差が出ているかを
+      // 目視で確認できるようにする
+      const { counts: baselineCounts } = computeLessonCounts(appState.weeklyTimetable || {}, months, {});
 
       let html = `
         <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
@@ -816,7 +819,7 @@
       if (classCodes.length === 0) {
         html += `<p class="text-gray-400 italic text-center py-10">時間割が登録されていません。「📸」ボタンから石川先生の時間割表を取り込んでください。</p>`;
       } else {
-        html += `<p class="text-xs text-gray-500 px-3 pt-2">※月報から振替・特別スケジュールを取り込んだ日付は実際の内容で計算し、未取り込みの日付は通常の曜日パターンで概算しています。</p>`;
+        html += `<p class="text-xs text-gray-500 px-3 pt-2">※月報から振替・特別スケジュールを取り込んだ日付は実際の内容で計算し、未取り込みの日付は通常の曜日パターンで概算しています。数字の下に取り消し線が入っている場合は、振替反映前の概算値と異なっている（＝振替が実際に反映されている）ことを示します。</p>`;
         html += `<div class="flex-1 overflow-auto p-2">
           <table class="matrix-table text-xs md:text-sm bg-white" style="min-width: 640px;">
             <thead>
@@ -829,12 +832,24 @@
             <tbody>
               ${classCodes.map(code => {
                 const rowCounts = counts[code];
+                const baseRowCounts = baselineCounts[code];
                 const total = rowCounts.reduce((a, b) => a + b, 0);
+                const baseTotal = baseRowCounts.reduce((a, b) => a + b, 0);
+                const cellsHtml = rowCounts.map((c, i) => {
+                  const base = baseRowCounts[i];
+                  if (c !== base) {
+                    return `<td class="text-center"><span class="font-bold text-purple-700">${c}</span><br><span class="text-[10px] text-gray-400 line-through">${base}</span></td>`;
+                  }
+                  return `<td class="text-center">${c}</td>`;
+                }).join('');
+                const totalHtml = total !== baseTotal
+                  ? `<span class="font-bold text-purple-700">${total}</span><br><span class="text-[10px] text-gray-400 line-through">${baseTotal}</span>`
+                  : `${total}`;
                 return `
                   <tr>
                     <td class="font-bold text-center bg-gray-50 sticky left-0">${code}</td>
-                    ${rowCounts.map(c => `<td class="text-center">${c}</td>`).join('')}
-                    <td class="text-center font-bold bg-gray-100">${total}</td>
+                    ${cellsHtml}
+                    <td class="text-center font-bold bg-gray-100">${totalHtml}</td>
                   </tr>
                 `;
               }).join('')}
