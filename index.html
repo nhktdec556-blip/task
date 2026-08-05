@@ -545,38 +545,6 @@
       return result;
     }
 
-    // 指定した日付範囲について、クラスコードごとに実際の授業の出現順リストを作る。
-    // 「授業の予定」（classSchedule）を保存済みの日はそれを、未保存の日は振替データからの
-    // 計算結果を使う（日/週ビューの表示と同じ実データソース）。教材（カリキュラム）の自動割り当てに使用。
-    async function computeClassOccurrences(startStr, endStr) {
-      const overridesMap = await fetchPeriodOverridesInRange(startStr, endStr);
-      const classScheduleMap = await fetchClassScheduleInRange(startStr, endStr);
-      const timetable = appState.weeklyTimetable || {};
-      const vacations = appState.vacations || [];
-
-      const occurrencesByClass = {}; // classCode -> [{dateStr, period}] (日付・限の昇順)
-      const cur = new Date(`${startStr}T00:00:00`);
-      const end = new Date(`${endStr}T00:00:00`);
-      while (cur <= end) {
-        const dateStr = formatDateStr(cur);
-        let entries;
-        if (classScheduleMap[dateStr] !== undefined) {
-          entries = classScheduleMap[dateStr].map(text => ({ text, period: null }));
-        } else {
-          entries = resolveActualClasses(cur, timetable, overridesMap[dateStr], vacations);
-        }
-        entries.forEach(entry => {
-          const m = String(entry.text).match(/(\d+-\d+)/);
-          if (!m) return;
-          const classCode = m[1];
-          if (!occurrencesByClass[classCode]) occurrencesByClass[classCode] = [];
-          occurrencesByClass[classCode].push({ dateStr, period: entry.period, text: entry.text });
-        });
-        cur.setDate(cur.getDate() + 1);
-      }
-      return occurrencesByClass;
-    }
-
     // クラスコードから学年を判定し、対応する教材（カリキュラム）リストを返す
     function curriculumListForClassCode(classCode, curriculum) {
       const grade = classCode.split('-')[0];
@@ -585,10 +553,61 @@
       return null;
     }
 
-    // occurrencesByClassの中で、指定した出現（dateStr・period・text一致）が何番目か(0始まり)を返す
-    function findOccurrenceIndex(occurrencesByClass, classCode, dateStr, period, text) {
-      const list = occurrencesByClass[classCode] || [];
-      return list.findIndex(o => o.dateStr === dateStr && o.period === period && o.text === text);
+    // 指定した日付範囲について、クラスコードごとに実際の授業回数を数え、日付ごとに教材（単元）を
+    // 順番に割り当てる。「授業の予定」（classSchedule）を保存済みの日はそれを、未保存の日は
+    // 振替データからの計算結果を使う（日/週ビューの表示と同じ実データソース）。
+    // 戻り値: { classCode: { dateStr: [その日の同クラスの出現順にトピック名を並べた配列] } }
+    // ※テキストの完全一致ではなく「同じクラスコードが何回目の出現か」だけで割り当てるため、
+    //   表示側の文言が多少違っていても崩れない。
+    async function computeCurriculumAssignments(startStr, endStr) {
+      const assignments = {};
+      const hasCurriculum = (appState.curriculum.grade1 || []).length > 0 || (appState.curriculum.grade3 || []).length > 0;
+      if (!hasCurriculum) return assignments;
+
+      const overridesMap = await fetchPeriodOverridesInRange(startStr, endStr);
+      const classScheduleMap = await fetchClassScheduleInRange(startStr, endStr);
+      const timetable = appState.weeklyTimetable || {};
+      const vacations = appState.vacations || [];
+      const offsets = appState.curriculumProgress.offsets || {};
+
+      const runningCount = {}; // classCode -> ここまでの出現回数
+      const cur = new Date(`${startStr}T00:00:00`);
+      const end = new Date(`${endStr}T00:00:00`);
+      while (cur <= end) {
+        const dateStr = formatDateStr(cur);
+        let entries;
+        if (classScheduleMap[dateStr] !== undefined) {
+          entries = classScheduleMap[dateStr].map(text => ({ text }));
+        } else {
+          entries = resolveActualClasses(cur, timetable, overridesMap[dateStr], vacations);
+        }
+        entries.forEach(entry => {
+          const text = entry.text;
+          const m = String(text).match(/(\d+-\d+)/);
+          if (!m) return;
+          const classCode = m[1];
+          const list = curriculumListForClassCode(classCode, appState.curriculum);
+          if (!list || list.length === 0) return;
+          const count = runningCount[classCode] || 0;
+          const topic = list[(offsets[classCode] || 0) + count] || null;
+          if (!assignments[classCode]) assignments[classCode] = {};
+          if (!assignments[classCode][dateStr]) assignments[classCode][dateStr] = [];
+          assignments[classCode][dateStr].push(topic);
+          runningCount[classCode] = count + 1;
+        });
+        cur.setDate(cur.getDate() + 1);
+      }
+      return assignments;
+    }
+
+    // 表示用の予定リストの中で、指定したインデックスの項目が「同じクラスコードの中で何番目か」を返す(0始まり)
+    function occurrenceIndexWithinDay(items, idx, classCode) {
+      let count = 0;
+      for (let i = 0; i < idx; i++) {
+        const t = items[i].text || items[i];
+        if (String(t).includes(classCode)) count++;
+      }
+      return count;
     }
 
     // 日付ごとの授業振替・特別スケジュール（学年→時限→表記）をplanner_dataにマージ保存する。
@@ -695,6 +714,13 @@
       const schoolEventsMap = weekTab === 'schedule' ? await fetchSchoolEventsInRange(formatDateStr(d), formatDateStr(endDate)) : {};
       const overridesMap = weekTab === 'class' ? await fetchPeriodOverridesInRange(formatDateStr(d), formatDateStr(endDate)) : {};
       const classScheduleMap = weekTab === 'class' ? await fetchClassScheduleInRange(formatDateStr(d), formatDateStr(endDate)) : {};
+      let weekAssignments = {};
+      if (weekTab === 'class' && appState.curriculumProgress.baselineDate) {
+        const baselineDate = appState.curriculumProgress.baselineDate;
+        const weekEndStr = formatDateStr(endDate);
+        const rangeEnd = weekEndStr > baselineDate ? weekEndStr : baselineDate;
+        weekAssignments = await computeCurriculumAssignments(baselineDate, rangeEnd);
+      }
 
       let html = `
         <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
@@ -724,7 +750,18 @@
           const dayClasses = classScheduleMap[dateStr] !== undefined
             ? classScheduleMap[dateStr].map(text => ({ text }))
             : resolveActualClasses(currentLoopDate, appState.weeklyTimetable || {}, overridesMap[dateStr], appState.vacations);
-          const classHtml = dayClasses.slice(0, 3).map(c => `<div class="text-xs bg-indigo-50 text-indigo-700 rounded px-1 mb-0.5 truncate">🎓 ${c.period ? `${c.period}限 ` : ''}${c.text}</div>`).join('');
+          const classHtml = dayClasses.slice(0, 3).map((c, idx) => {
+            const text = c.text || c;
+            const m = String(text).match(/(\d+-\d+)/);
+            let topicHtml = '';
+            if (m) {
+              const dayTopics = (weekAssignments[m[1]] && weekAssignments[m[1]][dateStr]) || [];
+              const posWithinDay = occurrenceIndexWithinDay(dayClasses, idx, m[1]);
+              const topic = dayTopics[posWithinDay];
+              if (topic) topicHtml = ` - ${topic}`;
+            }
+            return `<div class="text-xs bg-indigo-50 text-indigo-700 rounded px-1 mb-0.5 truncate">🎓 ${c.period ? `${c.period}限 ` : ''}${text}${topicHtml}</div>`;
+          }).join('');
           const classMoreHtml = dayClasses.length > 3 ? `<div class="text-[10px] text-gray-400">+${dayClasses.length - 3}コマ</div>` : '';
           cellHtml = (classHtml + classMoreHtml) || `<div class="text-xs text-gray-400 mt-1">授業予定なし</div>`;
         } else {
@@ -799,22 +836,18 @@
         // 各授業に対応する教材（単元）を自動で割り当てて表示する
         let decorate = null;
         const baselineDate = appState.curriculumProgress.baselineDate;
-        const hasCurriculum = (appState.curriculum.grade1 || []).length > 0 || (appState.curriculum.grade3 || []).length > 0;
-        if (baselineDate && hasCurriculum) {
+        if (baselineDate) {
           const todayStr = formatDateStr(appState.currentDate);
           const rangeEnd = todayStr > baselineDate ? todayStr : baselineDate;
-          const occurrencesByClass = await computeClassOccurrences(baselineDate, rangeEnd);
-          decorate = (item) => {
+          const assignments = await computeCurriculumAssignments(baselineDate, rangeEnd);
+          decorate = (item, idx) => {
             const text = item.text || item;
             const m = String(text).match(/(\d+-\d+)/);
             if (!m) return '';
             const classCode = m[1];
-            const list = curriculumListForClassCode(classCode, appState.curriculum);
-            if (!list) return '';
-            const idx = findOccurrenceIndex(occurrencesByClass, classCode, todayStr, null, text);
-            if (idx === -1) return '';
-            const offset = (appState.curriculumProgress.offsets || {})[classCode] || 0;
-            const topic = list[offset + idx];
+            const dayTopics = (assignments[classCode] && assignments[classCode][todayStr]) || [];
+            const posWithinDay = occurrenceIndexWithinDay(classSchedule, idx, classCode);
+            const topic = dayTopics[posWithinDay];
             return topic ? `<span class="block text-xs text-indigo-500 mt-0.5">📘 ${topic}</span>` : '';
           };
         }
@@ -1134,19 +1167,35 @@
       return Array.from(codes).sort();
     }
 
-    function renderCurriculumListItems(list, grade) {
-      if (list.length === 0) return `<p class="text-gray-400 italic text-sm py-2">教材が登録されていません</p>`;
-      return list.map((topic, idx) => `
-        <li class="p-2 bg-gray-50 border rounded mb-1 flex items-center justify-between text-sm">
-          <span class="flex-1"><span class="text-gray-400 mr-2">${idx + 1}.</span>${topic}</span>
-          <div class="space-x-1 flex-shrink-0 whitespace-nowrap">
-            <button data-action="curriculum-move" data-grade="${grade}" data-index="${idx}" data-dir="-1" class="px-1 text-gray-500 disabled:opacity-30" ${idx === 0 ? 'disabled' : ''}>▲</button>
-            <button data-action="curriculum-move" data-grade="${grade}" data-index="${idx}" data-dir="1" class="px-1 text-gray-500 disabled:opacity-30" ${idx === list.length - 1 ? 'disabled' : ''}>▼</button>
-            <button data-action="curriculum-edit" data-grade="${grade}" data-index="${idx}" class="text-blue-500 bg-white border border-blue-200 px-2 py-0.5 rounded text-xs font-bold">編集</button>
-            <button data-action="curriculum-delete" data-grade="${grade}" data-index="${idx}" class="text-red-500 bg-white border border-red-200 px-2 py-0.5 rounded text-xs font-bold">削除</button>
-          </div>
-        </li>
+    // 教材リストをスプレッドシート風の表として描画する（セルを直接編集できる）
+    function renderCurriculumTable(list, grade) {
+      const rows = list.map((topic, idx) => `
+        <tr>
+          <td class="text-center text-gray-400 bg-gray-50 w-10 border">${idx + 1}</td>
+          <td class="p-0 border">
+            <input type="text" class="curriculum-topic-input w-full border-0 p-2 text-sm focus:bg-yellow-50 outline-none" data-grade="${grade}" data-index="${idx}" value="${String(topic).replace(/"/g, '&quot;')}" />
+          </td>
+          <td class="whitespace-nowrap text-center border bg-gray-50">
+            <button data-action="curriculum-move" data-grade="${grade}" data-index="${idx}" data-dir="-1" class="px-1 text-gray-500 disabled:opacity-20" ${idx === 0 ? 'disabled' : ''}>▲</button>
+            <button data-action="curriculum-move" data-grade="${grade}" data-index="${idx}" data-dir="1" class="px-1 text-gray-500 disabled:opacity-20" ${idx === list.length - 1 ? 'disabled' : ''}>▼</button>
+            <button data-action="curriculum-delete" data-grade="${grade}" data-index="${idx}" class="text-red-500 px-1 font-bold">✕</button>
+          </td>
+        </tr>
       `).join('');
+      return `
+        <div class="overflow-x-auto border rounded">
+          <table class="w-full text-sm bg-white border-collapse">
+            <thead>
+              <tr class="bg-gray-100">
+                <th class="w-10 border py-1">#</th>
+                <th class="border py-1 text-left px-2">教材名</th>
+                <th class="w-28 border py-1"></th>
+              </tr>
+            </thead>
+            <tbody>${rows || `<tr><td colspan="3" class="text-center text-gray-400 italic py-4 border">教材が登録されていません</td></tr>`}</tbody>
+          </table>
+        </div>
+      `;
     }
 
     function renderCurriculumView() {
@@ -1189,12 +1238,12 @@
           <button id="btn-save-curriculum-progress" class="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white rounded font-semibold shadow mb-6">開始設定を保存</button>
 
           <h3 class="font-bold text-gray-700 mb-2 border-l-4 border-indigo-500 pl-2">1年生の教材リスト</h3>
-          <ul class="mb-2">${renderCurriculumListItems(appState.curriculum.grade1 || [], 'grade1')}</ul>
-          <button data-action="curriculum-add" data-grade="grade1" class="w-full mb-6 py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 教材を追加</button>
+          <div class="mb-2">${renderCurriculumTable(appState.curriculum.grade1 || [], 'grade1')}</div>
+          <button data-action="curriculum-add" data-grade="grade1" class="w-full mb-6 py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 行を追加</button>
 
           <h3 class="font-bold text-gray-700 mb-2 border-l-4 border-purple-500 pl-2">3年生の教材リスト</h3>
-          <ul class="mb-2">${renderCurriculumListItems(appState.curriculum.grade3 || [], 'grade3')}</ul>
-          <button data-action="curriculum-add" data-grade="grade3" class="w-full py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 教材を追加</button>
+          <div class="mb-2">${renderCurriculumTable(appState.curriculum.grade3 || [], 'grade3')}</div>
+          <button data-action="curriculum-add" data-grade="grade3" class="w-full py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 行を追加</button>
         </div>
       `;
       viewContainer.innerHTML = html;
@@ -1205,6 +1254,24 @@
       const docRef = doc(db, "users", appState.currentUserId, "settings", "curriculum");
       await setDoc(docRef, { ...appState.curriculum, [grade]: list });
     }
+
+    // 教材リスト（スプレッドシート風の表）のセルを直接編集したら保存する
+    viewContainer.addEventListener('change', async (e) => {
+      const input = e.target.closest('.curriculum-topic-input');
+      if (!input) return;
+      const grade = input.dataset.grade;
+      const idx = parseInt(input.dataset.index);
+      const val = input.value.trim();
+      const list = [...(appState.curriculum[grade] || [])];
+      list[idx] = val;
+      await saveCurriculumList(grade, list);
+    });
+    // Enterキーでセルの編集を確定できるようにする
+    viewContainer.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && e.target.classList.contains('curriculum-topic-input')) {
+        e.target.blur();
+      }
+    });
 
     async function saveCurriculumProgressFromForm() {
       const baselineDate = document.getElementById('curriculum-baseline-input').value;
@@ -1287,26 +1354,12 @@
 
       if (appState.currentView === 'curriculum') {
         const addBtn = e.target.closest('button[data-action="curriculum-add"]');
-        const editBtn = e.target.closest('button[data-action="curriculum-edit"]');
         const delBtn = e.target.closest('button[data-action="curriculum-delete"]');
         const moveBtn = e.target.closest('button[data-action="curriculum-move"]');
 
         if (addBtn) {
           const grade = addBtn.dataset.grade;
-          const val = prompt("追加する教材名を入力してください（例: アメリカ州4）");
-          if (val && val.trim()) {
-            await saveCurriculumList(grade, [...(appState.curriculum[grade] || []), val.trim()]);
-          }
-        } else if (editBtn) {
-          const grade = editBtn.dataset.grade;
-          const idx = parseInt(editBtn.dataset.index);
-          const current = appState.curriculum[grade][idx];
-          const val = prompt("教材名を編集してください", current);
-          if (val && val.trim()) {
-            const list = [...appState.curriculum[grade]];
-            list[idx] = val.trim();
-            await saveCurriculumList(grade, list);
-          }
+          await saveCurriculumList(grade, [...(appState.curriculum[grade] || []), '']);
         } else if (delBtn) {
           const grade = delBtn.dataset.grade;
           const idx = parseInt(delBtn.dataset.index);
