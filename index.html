@@ -111,6 +111,7 @@
       <h2 class="text-xl font-bold mb-4 border-b pb-2" id="event-modal-title">予定の編集</h2>
       <input type="text" id="event-input" class="w-full border-gray-300 rounded p-3 mb-4 bg-gray-50 focus:bg-white outline-none ring-2 ring-blue-500 text-gray-800" placeholder="例: 14:00 教科部会">
       <input type="hidden" id="event-index">
+      <input type="hidden" id="event-target" value="events">
       <div class="flex justify-end space-x-2">
         <button id="btn-cancel-event" class="px-4 py-2 bg-gray-200 hover:bg-gray-300 rounded text-gray-700 font-semibold">キャンセル</button>
         <button id="btn-save-event" class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded font-semibold shadow">保存</button>
@@ -226,9 +227,11 @@
       currentView: 'day', 
       currentDate: new Date(),
       currentUserId: null,
-      dayData: { timetableType: '通常', events: [], schoolEvents: [], memo: null },
+      dayData: { timetableType: '通常', events: [], schoolEvents: [], classSchedule: [], memo: null },
       weeklyTimetable: {},
-      vacations: []
+      vacations: [],
+      dayTab: 'schedule', // 'schedule'(学校の予定) | 'class'(授業の予定) - 日/週ビュー共通のタブ状態
+      weekTab: 'schedule'
     };
 
     const viewContainer = document.getElementById('view-container');
@@ -418,7 +421,7 @@
           appState.dayData.schoolEvents = dedupedSchoolEvents;
           if (hadDuplicates) saveCurrentDayData();
         } else {
-          appState.dayData = { timetableType: '通常', events: [], schoolEvents: [], memo: null };
+          appState.dayData = { timetableType: '通常', events: [], schoolEvents: [], classSchedule: [], memo: null };
         }
         renderView();
       }, (e) => {
@@ -476,6 +479,28 @@
         });
       } catch (e) {
         console.error("Error fetching period overrides range:", e);
+      }
+      return result;
+    }
+
+    // 指定した日付範囲の「授業の予定」（classSchedule、手動編集可能な授業リスト）をまとめて取得する。
+    // フィールドが存在する日付のみ結果に含める（未訪問＝振替データからまだ取得していない日と、
+    // 訪問済みだが全て削除して空になっている日を区別するため）。週ビューのプレビュー表示に使う。
+    async function fetchClassScheduleInRange(startStr, endStr) {
+      const result = {};
+      if (!appState.currentUserId) return result;
+      try {
+        const colRef = collection(db, "users", appState.currentUserId, "planner_data");
+        const q = query(colRef, where(documentId(), '>=', startStr), where(documentId(), '<=', endStr));
+        const snap = await getDocs(q);
+        snap.forEach(docSnap => {
+          const data = docSnap.data();
+          if (data.classSchedule !== undefined) {
+            result[docSnap.id] = data.classSchedule;
+          }
+        });
+      } catch (e) {
+        console.error("Error fetching class schedule range:", e);
       }
       return result;
     }
@@ -575,14 +600,26 @@
       endDate.setDate(d.getDate() + 6);
       const endStr = `${endDate.getMonth() + 1}/${endDate.getDate()}`;
 
-      const schoolEventsMap = await fetchSchoolEventsInRange(formatDateStr(d), formatDateStr(endDate));
-      const overridesMap = await fetchPeriodOverridesInRange(formatDateStr(d), formatDateStr(endDate));
+      const weekTab = appState.weekTab || 'schedule';
+      const tabBtnClass = (t) => t === weekTab
+        ? 'flex-1 py-2 bg-white text-gray-800 font-bold rounded-md shadow-sm text-sm'
+        : 'flex-1 py-2 text-gray-500 text-sm';
+
+      const schoolEventsMap = weekTab === 'schedule' ? await fetchSchoolEventsInRange(formatDateStr(d), formatDateStr(endDate)) : {};
+      const overridesMap = weekTab === 'class' ? await fetchPeriodOverridesInRange(formatDateStr(d), formatDateStr(endDate)) : {};
+      const classScheduleMap = weekTab === 'class' ? await fetchClassScheduleInRange(formatDateStr(d), formatDateStr(endDate)) : {};
 
       let html = `
         <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
           <button data-action="prev-week" class="px-3 py-1 bg-white border rounded shadow-sm font-bold text-gray-600">＜</button>
           <div class="font-bold text-md cursor-pointer" data-action="today">${startStr} 〜 ${endStr}</div>
           <button data-action="next-week" class="px-3 py-1 bg-white border rounded shadow-sm font-bold text-gray-600">＞</button>
+        </div>
+        <div class="px-3 pt-2 bg-gray-50 border-b">
+          <div class="flex bg-gray-100 rounded-lg p-1 mb-2">
+            <button data-action="week-tab" data-tab="schedule" class="${tabBtnClass('schedule')}">学校の予定</button>
+            <button data-action="week-tab" data-tab="class" class="${tabBtnClass('class')}">授業の予定</button>
+          </div>
         </div>
         <div class="flex-1 flex flex-col overflow-auto bg-gray-200 gap-px">
       `;
@@ -594,12 +631,19 @@
         const dateStr = formatDateStr(currentLoopDate);
         const isToday = (currentLoopDate.toDateString() === new Date().toDateString());
         const bgClass = isToday ? "bg-blue-50" : "bg-white";
-        const dayEvents = schoolEventsMap[dateStr] || [];
-        const dayClasses = resolveActualClasses(currentLoopDate, appState.weeklyTimetable || {}, overridesMap[dateStr], appState.vacations);
-        const schoolHtml = dayEvents.map(ev => `<div class="text-xs bg-red-50 text-red-700 rounded px-1 mb-0.5 truncate">🏫 ${ev}</div>`).join('');
-        const classHtml = dayClasses.slice(0, 2).map(c => `<div class="text-xs bg-indigo-50 text-indigo-700 rounded px-1 mb-0.5 truncate">🎓 ${c.period}限 ${c.text}</div>`).join('');
-        const classMoreHtml = dayClasses.length > 2 ? `<div class="text-[10px] text-gray-400">+${dayClasses.length - 2}コマ</div>` : '';
-        const eventsHtml = (schoolHtml + classHtml + classMoreHtml) || `<div class="text-xs text-gray-400 mt-1">タップして詳細</div>`;
+
+        let cellHtml;
+        if (weekTab === 'class') {
+          const dayClasses = classScheduleMap[dateStr] !== undefined
+            ? classScheduleMap[dateStr].map(text => ({ text }))
+            : resolveActualClasses(currentLoopDate, appState.weeklyTimetable || {}, overridesMap[dateStr], appState.vacations);
+          const classHtml = dayClasses.slice(0, 3).map(c => `<div class="text-xs bg-indigo-50 text-indigo-700 rounded px-1 mb-0.5 truncate">🎓 ${c.period ? `${c.period}限 ` : ''}${c.text}</div>`).join('');
+          const classMoreHtml = dayClasses.length > 3 ? `<div class="text-[10px] text-gray-400">+${dayClasses.length - 3}コマ</div>` : '';
+          cellHtml = (classHtml + classMoreHtml) || `<div class="text-xs text-gray-400 mt-1">授業予定なし</div>`;
+        } else {
+          const dayEvents = schoolEventsMap[dateStr] || [];
+          cellHtml = dayEvents.map(ev => `<div class="text-xs bg-red-50 text-red-700 rounded px-1 mb-0.5 truncate">🏫 ${ev}</div>`).join('') || `<div class="text-xs text-gray-400 mt-1">タップして詳細</div>`;
+        }
 
         html += `
           <div data-action="go-day" data-date="${dateStr}" class="${bgClass} flex-1 p-2 flex border-b cursor-pointer hover:bg-gray-50">
@@ -608,7 +652,7 @@
               <div class="text-lg font-bold text-gray-800">${dayNum}</div>
             </div>
             <div class="flex-1 text-sm text-gray-600 overflow-hidden">
-               ${eventsHtml}
+               ${cellHtml}
             </div>
           </div>
         `;
@@ -616,47 +660,80 @@
       viewContainer.innerHTML = html + `</div>`;
     }
 
+    // 編集可能な予定リスト（events/schoolEvents/classSchedule共通）を<li>のHTMLに変換する
+    function renderEditableList(items, target, opts) {
+      const { bgClass, borderClass, textClass, icon, emptyText } = opts;
+      let html = items.length > 0
+        ? items.map((item, idx) => `
+            <li class="p-3 ${bgClass} rounded border ${borderClass} mb-2 flex justify-between items-center shadow-sm">
+              <span class="flex-1 ${textClass} font-medium">${icon}${item.text || item}</span>
+              <div class="space-x-1 flex-shrink-0">
+                <button data-action="edit-item" data-target="${target}" data-index="${idx}" class="text-blue-500 bg-white border border-blue-200 px-2 py-1 rounded text-xs font-bold">編集</button>
+                <button data-action="delete-item" data-target="${target}" data-index="${idx}" class="text-red-500 bg-white border border-red-200 px-2 py-1 rounded text-xs font-bold">削除</button>
+              </div>
+            </li>
+          `).join('')
+        : `<p class="text-gray-400 italic mb-2 text-sm">${emptyText}</p>`;
+      html += `
+        <button data-action="add-item" data-target="${target}" class="w-full mt-2 py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 transition-colors font-semibold flex items-center justify-center text-sm">
+          <span class="mr-1">＋</span> 追加
+        </button>
+      `;
+      return html;
+    }
+
     function renderDayView() {
       const dateColor = (appState.dayData.timetableType !== '通常') ? 'text-red-600 border-red-600 bg-red-50' : 'text-gray-800 border-gray-300';
       const dateStrDisplay = `${appState.currentDate.getFullYear()}年${appState.currentDate.getMonth() + 1}月${appState.currentDate.getDate()}日`;
+      const tab = appState.dayTab || 'schedule';
+      const tabBtnClass = (t) => t === tab
+        ? 'flex-1 py-2 bg-white text-gray-800 font-bold rounded-md shadow-sm text-sm'
+        : 'flex-1 py-2 text-gray-500 text-sm';
 
-      const schoolEvents = appState.dayData.schoolEvents || [];
-      let schoolEventsHtml = schoolEvents.length > 0
-        ? schoolEvents.map((ev, idx) => `
-            <li class="p-3 bg-red-50 rounded border border-red-100 mb-2 flex justify-between items-center shadow-sm">
-              <span class="flex-1 text-red-900 font-medium">🏫 ${ev}</span>
-              <button data-action="delete-school" data-index="${idx}" class="text-red-500 bg-white border border-red-200 px-2 py-1 rounded text-xs font-bold flex-shrink-0">削除</button>
-            </li>
-          `).join('')
-        : '<p class="text-gray-400 italic mb-2 text-sm">校内行事予定はありません</p>';
-
-      const todaysClasses = resolveActualClasses(appState.currentDate, appState.weeklyTimetable || {}, appState.dayData.periodOverrides, appState.vacations);
-      let classesHtml = todaysClasses.length > 0
-        ? todaysClasses.map(c => `
-            <li class="p-3 bg-indigo-50 rounded border border-indigo-100 mb-2 flex items-center shadow-sm">
-              <span class="text-indigo-600 font-bold text-sm w-12 flex-shrink-0">${c.period}限</span>
-              <span class="flex-1 text-indigo-900 font-medium">🎓 ${c.text}</span>
-            </li>
-          `).join('')
-        : '<p class="text-gray-400 italic mb-2 text-sm">この曜日の授業予定はありません</p>';
-
-      let eventsHtml = appState.dayData.events.length > 0
-        ? appState.dayData.events.map((e, idx) => `
-            <li class="p-3 bg-blue-50 rounded border border-blue-100 mb-2 flex justify-between items-center shadow-sm">
-              <span class="flex-1 text-blue-900 font-medium">${e.text || e}</span>
-              <div class="space-x-1 flex-shrink-0">
-                <button data-action="edit" data-index="${idx}" class="text-blue-500 bg-white border border-blue-200 px-2 py-1 rounded text-xs font-bold">編集</button>
-                <button data-action="delete" data-index="${idx}" class="text-red-500 bg-white border border-red-200 px-2 py-1 rounded text-xs font-bold">削除</button>
-              </div>
-            </li>
-          `).join('') 
-        : '<p class="text-gray-500 italic mb-2">予定はありません</p>';
-
-      eventsHtml += `
-        <button id="btn-add-event" class="w-full mt-2 py-3 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 transition-colors font-semibold flex items-center justify-center">
-          <span class="mr-1">＋</span> 新しい予定を追加
-        </button>
+      const tabsHtml = `
+        <div class="flex bg-gray-100 rounded-lg p-1 mb-4">
+          <button data-action="day-tab" data-tab="schedule" class="${tabBtnClass('schedule')}">学校の予定</button>
+          <button data-action="day-tab" data-tab="class" class="${tabBtnClass('class')}">授業の予定</button>
+        </div>
       `;
+
+      let bodyHtml;
+      if (tab === 'class') {
+        // classScheduleが未取得（振替データからまだ一度も反映していない）場合は、
+        // 振替データからの計算結果をその場で表示する（別途取り込み直す必要はない）。
+        // 編集・削除すると、この時点でappState.dayDataに反映されて保存対象になる。
+        if (appState.dayData.classSchedule === undefined) {
+          appState.dayData.classSchedule = resolveActualClasses(appState.currentDate, appState.weeklyTimetable || {}, appState.dayData.periodOverrides, appState.vacations)
+            .map(c => `${c.period}限 ${c.text}`);
+        }
+        const classSchedule = appState.dayData.classSchedule || [];
+        const listHtml = renderEditableList(classSchedule, 'classSchedule', {
+          bgClass: 'bg-indigo-50', borderClass: 'border-indigo-100', textClass: 'text-indigo-900',
+          icon: '🎓 ', emptyText: '授業の予定はありません'
+        });
+        bodyHtml = `
+          <div class="flex justify-between items-center mb-3">
+            <h3 class="font-bold text-gray-700 border-l-4 border-indigo-500 pl-2">授業の予定</h3>
+            <button id="btn-sync-class-schedule" class="text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 px-2 py-1 rounded font-bold">📥 振替データから取得</button>
+          </div>
+          <ul class="mb-6">${listHtml}</ul>
+        `;
+      } else {
+        const schoolEventsHtml = renderEditableList(appState.dayData.schoolEvents || [], 'schoolEvents', {
+          bgClass: 'bg-red-50', borderClass: 'border-red-100', textClass: 'text-red-900',
+          icon: '🏫 ', emptyText: '校内行事予定はありません'
+        });
+        const eventsHtml = renderEditableList(appState.dayData.events || [], 'events', {
+          bgClass: 'bg-blue-50', borderClass: 'border-blue-100', textClass: 'text-blue-900',
+          icon: '', emptyText: '予定はありません'
+        });
+        bodyHtml = `
+          <h3 class="font-bold text-gray-700 mb-3 border-l-4 border-red-500 pl-2">校内行事予定</h3>
+          <ul class="mb-6">${schoolEventsHtml}</ul>
+          <h3 class="font-bold text-gray-700 mb-3 border-l-4 border-blue-500 pl-2">本日の予定</h3>
+          <ul class="mb-6">${eventsHtml}</ul>
+        `;
+      }
 
       viewContainer.innerHTML = `
         <div class="p-3 bg-gray-50 border-b flex justify-between items-center shadow-sm">
@@ -669,12 +746,8 @@
             <span class="text-sm border px-3 py-1 rounded-full font-bold shadow-sm ${dateColor}">${appState.dayData.timetableType}日課</span>
             <button id="btn-open-memo" class="bg-yellow-100 text-yellow-800 px-4 py-2 rounded-lg shadow font-bold">✍️ 手書きメモ</button>
           </div>
-          <h3 class="font-bold text-gray-700 mb-3 border-l-4 border-red-500 pl-2">校内行事予定</h3>
-          <ul class="mb-6">${schoolEventsHtml}</ul>
-          <h3 class="font-bold text-gray-700 mb-3 border-l-4 border-indigo-500 pl-2">石川先生の授業予定</h3>
-          <ul class="mb-6">${classesHtml}</ul>
-          <h3 class="font-bold text-gray-700 mb-3 border-l-4 border-blue-500 pl-2">本日の予定</h3>
-          <ul class="mb-6">${eventsHtml}</ul>
+          ${tabsHtml}
+          ${bodyHtml}
           ${appState.dayData.memo ? `<h3 class="font-bold text-gray-700 mt-6 mb-3 border-l-4 border-yellow-500 pl-2">保存されたメモ</h3><img src="${appState.dayData.memo}" class="border rounded-lg bg-yellow-50 w-full shadow-sm" />` : ''}
         </div>
       `;
@@ -947,6 +1020,7 @@
         else if (type === 'next-month') { appState.currentDate.setMonth(appState.currentDate.getMonth() + 1); renderView('slide-enter-right'); }
         else if (type === 'prev-week') { appState.currentDate.setDate(appState.currentDate.getDate() - 7); renderView('slide-enter-left'); }
         else if (type === 'next-week') { appState.currentDate.setDate(appState.currentDate.getDate() + 7); renderView('slide-enter-right'); }
+        else if (type === 'week-tab') { appState.weekTab = action.dataset.tab; renderView(); }
         else if (type === 'prev-day') { appState.currentDate.setDate(appState.currentDate.getDate() - 1); await loadDataForCurrentDate(); }
         else if (type === 'next-day') { appState.currentDate.setDate(appState.currentDate.getDate() + 1); await loadDataForCurrentDate(); }
         else if (type === 'prev-year') { appState.currentDate.setFullYear(appState.currentDate.getFullYear() - 1); renderView('slide-enter-left'); }
@@ -963,25 +1037,28 @@
       }
 
       if (appState.currentView === 'day') {
-        const editBtn = e.target.closest('button[data-action="edit"]');
-        const delBtn = e.target.closest('button[data-action="delete"]');
-        const delSchoolBtn = e.target.closest('button[data-action="delete-school"]');
-        const addBtn = e.target.closest('#btn-add-event');
-        if (editBtn) {
+        const dayTabBtn = e.target.closest('button[data-action="day-tab"]');
+        const editBtn = e.target.closest('button[data-action="edit-item"]');
+        const delBtn = e.target.closest('button[data-action="delete-item"]');
+        const addBtn = e.target.closest('button[data-action="add-item"]');
+        const syncClassBtn = e.target.closest('#btn-sync-class-schedule');
+
+        if (dayTabBtn) {
+          appState.dayTab = dayTabBtn.dataset.tab;
+          renderView();
+        } else if (editBtn) {
           const idx = parseInt(editBtn.dataset.index);
+          const target = editBtn.dataset.target;
+          const item = appState.dayData[target][idx];
           document.getElementById('event-modal-title').textContent = '予定の編集';
-          document.getElementById('event-input').value = appState.dayData.events[idx].text || appState.dayData.events[idx];
+          document.getElementById('event-input').value = (item && item.text) || item;
           document.getElementById('event-index').value = idx;
+          document.getElementById('event-target').value = target;
           document.getElementById('event-modal').classList.remove('hidden');
         } else if (delBtn) {
+          const target = delBtn.dataset.target;
           if (confirm("この予定を削除しますか？")) {
-            appState.dayData.events.splice(parseInt(delBtn.dataset.index), 1);
-            await saveCurrentDayData();
-            renderView();
-          }
-        } else if (delSchoolBtn) {
-          if (confirm("この校内行事予定を削除しますか？")) {
-            appState.dayData.schoolEvents.splice(parseInt(delSchoolBtn.dataset.index), 1);
+            appState.dayData[target].splice(parseInt(delBtn.dataset.index), 1);
             await saveCurrentDayData();
             renderView();
           }
@@ -989,7 +1066,14 @@
           document.getElementById('event-modal-title').textContent = '予定の追加';
           document.getElementById('event-input').value = '';
           document.getElementById('event-index').value = -1;
+          document.getElementById('event-target').value = addBtn.dataset.target;
           document.getElementById('event-modal').classList.remove('hidden');
+        } else if (syncClassBtn) {
+          const computed = resolveActualClasses(appState.currentDate, appState.weeklyTimetable || {}, appState.dayData.periodOverrides, appState.vacations)
+            .map(c => `${c.period}限 ${c.text}`);
+          appState.dayData.classSchedule = dedupeEvents([...(appState.dayData.classSchedule || []), ...computed]);
+          await saveCurrentDayData();
+          renderView();
         }
       }
     });
@@ -999,8 +1083,10 @@
       const val = document.getElementById('event-input').value.trim();
       if (!val) return alert("予定を入力してください");
       const idx = parseInt(document.getElementById('event-index').value);
-      if (idx >= 0) appState.dayData.events[idx] = val;
-      else appState.dayData.events.push(val);
+      const target = document.getElementById('event-target').value;
+      if (!appState.dayData[target]) appState.dayData[target] = [];
+      if (idx >= 0) appState.dayData[target][idx] = val;
+      else appState.dayData[target].push(val);
       await saveCurrentDayData();
       renderView();
       document.getElementById('event-modal').classList.add('hidden');
