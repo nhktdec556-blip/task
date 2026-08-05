@@ -284,13 +284,15 @@
     // 指定した実際の日付に石川先生が担当する授業コマを1〜6限の順で返す。
     // 授業時数カウントと同じロジック（振替・長期休業）を使い、日/週ビューの表示と
     // 実際のデータをリンクさせる（週間時間割だけの単純な曜日パターンにはしない）。
+    // 月報から取り込んだ振替データに明記されているコマのみを対象とする（曜日パターンからの
+    // 推測はしない）。祝日や長期休業など、月報に記載がない・取り込んでいない日は表示されない。
     function resolveActualClasses(dateObj, timetable, dayOverrides, vacations) {
       const dateStr = formatDateStr(dateObj);
       if (isVacationDate(dateStr, vacations)) return [];
+      if (!dayOverrides) return [];
 
       const jpWeekdays = ['日', '月', '火', '水', '木', '金', '土'];
       const realWeekday = jpWeekdays[dateObj.getDay()];
-      if (!['月', '火', '水', '木', '金'].includes(realWeekday)) return [];
 
       const naturalTextMap = {}; // `${曜日}-${限}` -> コマの内容（全教科対象、社会科に絞らない）
       Object.entries(timetable).forEach(([key, text]) => {
@@ -299,29 +301,24 @@
         naturalTextMap[key] = text;
       });
       const gradeOf = (text) => parseClassCode(text).split('-')[0];
-      const grades = Array.from(new Set(Object.values(naturalTextMap).map(gradeOf)));
 
       const results = [];
       for (let period = 1; period <= 6; period++) {
         let found = null;
-        grades.forEach(grade => {
-          const override = dayOverrides && dayOverrides[grade] && dayOverrides[grade][String(period)];
-          if (override !== undefined) {
-            const m = SWAP_PATTERN.exec(override);
-            if (m) {
-              const text = naturalTextMap[`${m[1]}-${Number(m[2])}`];
-              if (text && gradeOf(text) === grade) found = text;
-            } else {
-              // テスト・学活等の固定表記：石川先生がこの学年・この時間に本来授業を
-              // 持っている場合のみ、その内容（テスト等）に変わったものとして表示する
-              const naturalOwnText = naturalTextMap[`${realWeekday}-${period}`];
-              if (naturalOwnText && gradeOf(naturalOwnText) === grade) {
-                found = `${parseClassCode(naturalOwnText)} ${override}`;
-              }
-            }
-          } else {
-            const text = naturalTextMap[`${realWeekday}-${period}`];
+        Object.keys(dayOverrides).forEach(grade => {
+          const override = dayOverrides[grade] && dayOverrides[grade][String(period)];
+          if (override === undefined) return; // この学年・限は月報に記載がない → 表示しない
+          const m = SWAP_PATTERN.exec(override);
+          if (m) {
+            const text = naturalTextMap[`${m[1]}-${Number(m[2])}`];
             if (text && gradeOf(text) === grade) found = text;
+          } else {
+            // テスト・学活等の固定表記：石川先生がこの学年で本来この時間に授業を
+            // 持っている場合のみ、その内容（テスト等）に変わったものとして表示する
+            const naturalOwnText = naturalTextMap[`${realWeekday}-${period}`];
+            if (naturalOwnText && gradeOf(naturalOwnText) === grade) {
+              found = `${parseClassCode(naturalOwnText)} ${override}`;
+            }
           }
         });
         if (found) results.push({ period, text: found });
@@ -808,16 +805,17 @@
     // 週間時間割(石川先生の社会科のコマ)から、クラスごと・月ごとの授業時数を実日付ベースで集計する。
     // 月報から振替（例:「火1」）や特別スケジュール（テスト・学活等）が抽出できている日付はそれを優先し、
     // 抽出できていない日付はその日の実際の曜日どおりに通常授業が行われるものとして概算する。
+    // 月報から取り込んだ振替データに明記されているコマのみを集計する（曜日パターンからの
+    // 推測はしない）。祝日・長期休業・未取り込みの日は自動的にカウントされない。
     function computeLessonCounts(timetable, months, overridesMap, vacations) {
       const naturalMap = {}; // `${曜日}-${限}` -> クラスコード（社会科のみ）
       const gradeToClassCodes = {};
       Object.entries(timetable).forEach(([key, text]) => {
-        const [weekday, period] = key.split('-');
         const classCode = parseClassCode(text);
         if (!/^\d+-\d+$/.test(classCode)) return; // 「会議」等クラス表記でない項目は対象外
         const subject = String(text).slice(classCode.length).trim();
         if (subject !== '社会') return; // 同じクラスでも学活・総合・道徳等は除き、社会科のみ集計
-        naturalMap[`${weekday}-${period}`] = classCode;
+        naturalMap[key] = classCode;
         const grade = classCode.split('-')[0];
         if (!gradeToClassCodes[grade]) gradeToClassCodes[grade] = new Set();
         gradeToClassCodes[grade].add(classCode);
@@ -825,40 +823,33 @@
 
       const classCodes = Array.from(new Set(Object.values(naturalMap))).sort();
       const counts = {};
+      const coveredDays = months.map(() => 0); // 月ごとの、振替データを取り込めている日数
       classCodes.forEach(code => { counts[code] = months.map(() => 0); });
-      if (classCodes.length === 0) return { classCodes, counts };
+      if (classCodes.length === 0) return { classCodes, counts, coveredDays };
 
-      const grades = Object.keys(gradeToClassCodes);
+      const monthIndexOf = {};
+      months.forEach((ym, idx) => { monthIndexOf[`${ym.year}-${String(ym.month + 1).padStart(2, '0')}`] = idx; });
 
-      months.forEach((ym, monthIdx) => {
-        const daysInMonth = new Date(ym.year, ym.month + 1, 0).getDate();
-        for (let d = 1; d <= daysInMonth; d++) {
-          const dateObj = new Date(ym.year, ym.month, d);
-          const realWeekday = JP_WEEKDAYS[dateObj.getDay()];
-          if (!['月', '火', '水', '木', '金'].includes(realWeekday)) continue; // 土日は対象外
-          const dateStr = `${ym.year}-${String(ym.month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
-          if (isVacationDate(dateStr, vacations)) continue; // 長期休業期間（夏休み等）は授業なしとして扱う
-          const dayOverrides = overridesMap[dateStr];
+      Object.entries(overridesMap).forEach(([dateStr, dayOverrides]) => {
+        const monthIdx = monthIndexOf[dateStr.slice(0, 7)];
+        if (monthIdx === undefined) return; // 対象期間（今月〜3月）外
+        if (isVacationDate(dateStr, vacations)) return; // 長期休業期間として登録済みの日は除外
+        coveredDays[monthIdx]++;
 
-          grades.forEach(grade => {
-            for (let period = 1; period <= 6; period++) {
-              const override = dayOverrides && dayOverrides[grade] && dayOverrides[grade][String(period)];
-              let effWeekday = realWeekday, effPeriod = period;
-              if (override !== undefined) {
-                const m = SWAP_PATTERN.exec(override);
-                if (m) { effWeekday = m[1]; effPeriod = Number(m[2]); }
-                else continue; // テスト・学活等の固定表記 → この学年・限は社会科の授業なし
-              }
-              const classCode = naturalMap[`${effWeekday}-${effPeriod}`];
-              if (classCode && gradeToClassCodes[grade].has(classCode)) {
-                counts[classCode][monthIdx]++;
-              }
+        Object.entries(dayOverrides).forEach(([grade, periods]) => {
+          if (!gradeToClassCodes[grade]) return; // 石川先生が担当していない学年
+          Object.values(periods).forEach(value => {
+            const m = SWAP_PATTERN.exec(value);
+            if (!m) return; // テスト・学活等の固定表記 → 社会科の授業なし
+            const classCode = naturalMap[`${m[1]}-${Number(m[2])}`];
+            if (classCode && gradeToClassCodes[grade].has(classCode)) {
+              counts[classCode][monthIdx]++;
             }
           });
-        }
+        });
       });
 
-      return { classCodes, counts };
+      return { classCodes, counts, coveredDays };
     }
 
     async function renderLessonCountView() {
@@ -868,10 +859,7 @@
       const endStr = `${lastMonth.year}-${String(lastMonth.month + 1).padStart(2, '0')}-31`;
       const overridesMap = await fetchPeriodOverridesInRange(startStr, endStr);
       const vacations = appState.vacations || [];
-      const { classCodes, counts } = computeLessonCounts(appState.weeklyTimetable || {}, months, overridesMap, vacations);
-      // 振替を反映しなかった場合（曜日パターンのみの概算。ただし長期休業は反映）も計算し、
-      // 実際に差が出ているかを目視で確認できるようにする
-      const { counts: baselineCounts } = computeLessonCounts(appState.weeklyTimetable || {}, months, {}, vacations);
+      const { classCodes, counts, coveredDays } = computeLessonCounts(appState.weeklyTimetable || {}, months, overridesMap, vacations);
 
       let html = `
         <div class="p-3 bg-gray-50 border-b flex justify-between items-center flex-wrap gap-2">
@@ -912,7 +900,7 @@
       if (classCodes.length === 0) {
         html += `<p class="text-gray-400 italic text-center py-10">時間割が登録されていません。「📸」ボタンから石川先生の時間割表を取り込んでください。</p>`;
       } else {
-        html += `<p class="text-xs text-gray-500 px-3 pt-2">※月報から振替・特別スケジュールを取り込んだ日付は実際の内容で計算し、未取り込みの日付は通常の曜日パターンで概算しています。数字の下に取り消し線が入っている場合は、振替反映前の概算値と異なっている（＝振替が実際に反映されている）ことを示します。</p>`;
+        html += `<p class="text-xs text-gray-500 px-3 pt-2">※月報の振替として取り込まれたコマのみを集計しています。祝日・長期休業・まだ取り込んでいない日は0件として扱われ、曜日パターンからの推測はしません。「取込日数」の行は、その月のうち実際に振替データを取り込めている日数です。</p>`;
         html += `<div class="flex-1 overflow-auto p-2">
           <table class="matrix-table text-xs md:text-sm bg-white" style="min-width: 640px;">
             <thead>
@@ -923,26 +911,19 @@
               </tr>
             </thead>
             <tbody>
+              <tr class="bg-gray-50 text-gray-500">
+                <td class="font-bold text-center sticky left-0 bg-gray-50">取込日数</td>
+                ${coveredDays.map(n => `<td class="text-center">${n}</td>`).join('')}
+                <td class="text-center font-bold">${coveredDays.reduce((a, b) => a + b, 0)}</td>
+              </tr>
               ${classCodes.map(code => {
                 const rowCounts = counts[code];
-                const baseRowCounts = baselineCounts[code];
                 const total = rowCounts.reduce((a, b) => a + b, 0);
-                const baseTotal = baseRowCounts.reduce((a, b) => a + b, 0);
-                const cellsHtml = rowCounts.map((c, i) => {
-                  const base = baseRowCounts[i];
-                  if (c !== base) {
-                    return `<td class="text-center"><span class="font-bold text-purple-700">${c}</span><br><span class="text-[10px] text-gray-400 line-through">${base}</span></td>`;
-                  }
-                  return `<td class="text-center">${c}</td>`;
-                }).join('');
-                const totalHtml = total !== baseTotal
-                  ? `<span class="font-bold text-purple-700">${total}</span><br><span class="text-[10px] text-gray-400 line-through">${baseTotal}</span>`
-                  : `${total}`;
                 return `
                   <tr>
                     <td class="font-bold text-center bg-gray-50 sticky left-0">${code}</td>
-                    ${cellsHtml}
-                    <td class="text-center font-bold bg-gray-100">${totalHtml}</td>
+                    ${rowCounts.map(c => `<td class="text-center">${c}</td>`).join('')}
+                    <td class="text-center font-bold bg-gray-100">${total}</td>
                   </tr>
                 `;
               }).join('')}
