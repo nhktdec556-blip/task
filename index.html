@@ -706,6 +706,21 @@
     const SWAP_PATTERN = /^(月|火|水|木|金)([1-6])$/;
     const JP_WEEKDAYS = ['日', '月', '火', '水', '木', '金', '土'];
 
+    // Geminiの抽出結果は表記ゆれ（全角数字、空白、「曜日」の有無等）が起こり得るため、
+    // 振替の値と学年を判定・保存の前に正規化する
+    function normalizeSwapValue(raw) {
+      if (raw === undefined || raw === null) return raw;
+      let v = String(raw).trim().replace(/\s+/g, '');
+      v = v.replace(/[０-９]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0xFEE0)); // 全角数字→半角
+      v = v.replace(/^(月|火|水|木|金)(?:曜日|曜)?([1-6])$/, '$1$2'); // 「火曜日1」「火曜1」→「火1」
+      return v;
+    }
+    function normalizeGrade(raw) {
+      if (raw === undefined || raw === null) return raw;
+      const m = String(raw).match(/\d+/);
+      return m ? m[0] : String(raw).trim();
+    }
+
     // 週間時間割(石川先生の社会科のコマ)から、クラスごと・月ごとの授業時数を実日付ベースで集計する。
     // 月報から振替（例:「火1」）や特別スケジュール（テスト・学活等）が抽出できている日付はそれを優先し、
     // 抽出できていない日付はその日の実際の曜日どおりに通常授業が行われるものとして概算する。
@@ -774,6 +789,28 @@
           <div class="font-bold text-lg">授業時数カウント（社会科・今月〜3月）</div>
           <button id="btn-open-swap-scan" class="bg-purple-600 hover:bg-purple-500 text-white text-xs px-3 py-1.5 rounded shadow font-bold whitespace-nowrap">📄 振替を取り込む</button>
         </div>
+      `;
+
+      // 実際に取り込めている振替データを目視で確認できるようにする（反映されているのに
+      // 数値が変わらない場合の切り分け用: 期間外の日付になっていないか等がすぐ分かる）
+      const overrideDates = Object.keys(overridesMap).sort();
+      const overridesListHtml = overrideDates.length === 0
+        ? `<p class="text-gray-400 italic text-center py-3 text-xs">この期間（${startStr}〜${endStr}）に取り込み済みの振替データはありません。</p>`
+        : `<div class="divide-y max-h-40 overflow-y-auto">
+            ${overrideDates.map(dateStr => {
+              const parts = Object.entries(overridesMap[dateStr]).flatMap(([grade, periods]) =>
+                Object.entries(periods)
+                  .sort((a, b) => Number(a[0]) - Number(b[0]))
+                  .map(([period, value]) => `${grade}学年${period}限:${value}`)
+              );
+              return `<div class="px-3 py-1.5 text-xs text-gray-700"><span class="font-bold text-purple-700">${dateStr}</span> ${parts.join(' / ')}</div>`;
+            }).join('')}
+          </div>`;
+      html += `
+        <details class="mx-2 mt-2 border rounded bg-gray-50">
+          <summary class="cursor-pointer px-3 py-2 text-sm font-bold text-gray-600">取り込み済みの振替データ（${overrideDates.length}日分）</summary>
+          ${overridesListHtml}
+        </details>
       `;
 
       if (classCodes.length === 0) {
@@ -1260,15 +1297,19 @@
         if (extractedSwaps.length === 0) {
           list.innerHTML = `<li class="text-gray-500 italic p-3 text-center">振替・特別スケジュールが見つかりませんでした</li>`;
         } else {
-          list.innerHTML = extractedSwaps.map(ev => `
-            <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${ev.date}" data-grade="${ev.grade}" data-period="${ev.period}">
-              <div class="flex justify-between items-center mb-1">
-                <span class="font-bold text-purple-700 text-sm">${ev.date} ${ev.grade}学年 ${ev.period}限</span>
-                <button type="button" class="scan-item-remove text-gray-400 hover:text-red-600 font-bold px-1 flex-shrink-0" title="この項目は反映しない">✕</button>
-              </div>
-              <input type="text" value="${ev.value}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
-            </li>
-          `).join('');
+          list.innerHTML = extractedSwaps.map(ev => {
+            const grade = normalizeGrade(ev.grade);
+            const value = normalizeSwapValue(ev.value);
+            return `
+              <li class="bg-white p-3 rounded shadow border flex flex-col scan-item" data-date="${ev.date}" data-grade="${grade}" data-period="${ev.period}">
+                <div class="flex justify-between items-center mb-1">
+                  <span class="font-bold text-purple-700 text-sm">${ev.date} ${grade}学年 ${ev.period}限</span>
+                  <button type="button" class="scan-item-remove text-gray-400 hover:text-red-600 font-bold px-1 flex-shrink-0" title="この項目は反映しない">✕</button>
+                </div>
+                <input type="text" value="${value}" class="w-full bg-gray-50 border p-1 rounded outline-none scan-val" />
+              </li>
+            `;
+          }).join('');
         }
 
         document.getElementById('swap-scan-result-area').classList.remove('hidden');
@@ -1290,17 +1331,23 @@
       const overridesByDate = {};
       items.forEach(item => {
         const dateStr = item.dataset.date;
-        const grade = item.dataset.grade;
-        const val = item.querySelector('.scan-val').value;
+        const grade = normalizeGrade(item.dataset.grade);
+        const val = normalizeSwapValue(item.querySelector('.scan-val').value);
         if (!overridesByDate[dateStr]) overridesByDate[dateStr] = {};
         if (!overridesByDate[dateStr][grade]) overridesByDate[dateStr][grade] = {};
         overridesByDate[dateStr][grade][item.dataset.period] = val;
       });
 
-      await applyPeriodOverrideUpdates(overridesByDate);
+      try {
+        await applyPeriodOverrideUpdates(overridesByDate);
+      } catch (error) {
+        console.error(error);
+        alert("振替・特別スケジュールの反映に失敗しました: " + error.message);
+        return;
+      }
 
       alert("振替・特別スケジュールを反映しました！授業時数カウントに反映されます。");
-      renderView();
+      await renderView();
       document.getElementById('swap-scan-modal').classList.add('hidden');
       document.getElementById('swap-file-upload').value = '';
     });
