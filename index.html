@@ -233,7 +233,7 @@
       vacations: [],
       dayTab: 'schedule', // 'schedule'(学校の予定) | 'class'(授業の予定) - 日/週ビュー共通のタブ状態
       weekTab: 'schedule',
-      curriculum: { grade1: [], grade3: [] }, // 学年ごとの教材（単元）の並び順リスト
+      curriculum: { grade1: { columns: ['教材名'], rows: [] }, grade3: { columns: ['教材名'], rows: [] } }, // 学年ごとの教材リスト（列を自由に追加できる表形式。1列目は教材名で自動割り当てに使用）
       curriculumProgress: { baselineDate: null, offsets: {} } // クラスごとの開始位置と、自動集計を始める基準日
     };
 
@@ -286,6 +286,18 @@
       return (vacations || []).some(v => v.start <= dateStr && dateStr <= v.end);
     }
 
+    // 教材データを表形式（columns/rows）に正規化する。旧バージョン（文字列配列）で保存されたデータも
+    // 自動的に「教材名」列1つの表として読み込めるようにする（後方互換のための移行処理）
+    function normalizeCurriculumGrade(raw) {
+      if (Array.isArray(raw)) {
+        return { columns: ['教材名'], rows: raw.map(topic => [topic]) };
+      }
+      if (raw && Array.isArray(raw.columns) && raw.columns.length > 0 && Array.isArray(raw.rows)) {
+        return { columns: raw.columns, rows: raw.rows.map(row => Array.isArray(row) ? row : []) };
+      }
+      return { columns: ['教材名'], rows: [] };
+    }
+
     function subscribeCurriculum() {
       if (unsubscribeCurriculumListener) {
         unsubscribeCurriculumListener();
@@ -294,7 +306,7 @@
       const docRef = doc(db, "users", appState.currentUserId, "settings", "curriculum");
       unsubscribeCurriculumListener = onSnapshot(docRef, (docSnap) => {
         const data = docSnap.exists() ? docSnap.data() : {};
-        appState.curriculum = { grade1: data.grade1 || [], grade3: data.grade3 || [] };
+        appState.curriculum = { grade1: normalizeCurriculumGrade(data.grade1), grade3: normalizeCurriculumGrade(data.grade3) };
         renderView();
       }, (e) => {
         console.error("Error loading curriculum:", e);
@@ -545,12 +557,13 @@
       return result;
     }
 
-    // クラスコードから学年を判定し、対応する教材（カリキュラム）リストを返す
-    function curriculumListForClassCode(classCode, curriculum) {
+    // クラスコードから学年を判定し、対応する教材リストの1列目（教材名）を順番の配列として返す
+    // ※2列目以降（日付・備考など）は自由記述欄であり、自動割り当てのロジックには使用しない
+    function curriculumTopicsForClassCode(classCode, curriculum) {
       const grade = classCode.split('-')[0];
-      if (grade === '1') return curriculum.grade1 || [];
-      if (grade === '3') return curriculum.grade3 || [];
-      return null;
+      const gradeData = grade === '1' ? curriculum.grade1 : grade === '3' ? curriculum.grade3 : null;
+      if (!gradeData) return null;
+      return (gradeData.rows || []).map(row => row[0] || '');
     }
 
     // 指定した日付範囲について、クラスコードごとに実際の授業回数を数え、日付ごとに教材（単元）を
@@ -561,7 +574,7 @@
     //   表示側の文言が多少違っていても崩れない。
     async function computeCurriculumAssignments(startStr, endStr) {
       const assignments = {};
-      const hasCurriculum = (appState.curriculum.grade1 || []).length > 0 || (appState.curriculum.grade3 || []).length > 0;
+      const hasCurriculum = (appState.curriculum.grade1.rows || []).length > 0 || (appState.curriculum.grade3.rows || []).length > 0;
       if (!hasCurriculum) return assignments;
 
       const overridesMap = await fetchPeriodOverridesInRange(startStr, endStr);
@@ -586,7 +599,7 @@
           const m = String(text).match(/(\d+-\d+)/);
           if (!m) return;
           const classCode = m[1];
-          const list = curriculumListForClassCode(classCode, appState.curriculum);
+          const list = curriculumTopicsForClassCode(classCode, appState.curriculum);
           if (!list || list.length === 0) return;
           const count = runningCount[classCode] || 0;
           const topic = list[(offsets[classCode] || 0) + count] || null;
@@ -1167,32 +1180,52 @@
       return Array.from(codes).sort();
     }
 
-    // 教材リストをスプレッドシート風の表として描画する（セルを直接編集できる）
-    function renderCurriculumTable(list, grade) {
-      const rows = list.map((topic, idx) => `
+    // 教材リストを複数列を持つ本格的な表（スプレッドシート風）として描画する
+    // 1列目（教材名）は自動割り当てのロジックに使われる特別な列で削除不可。2列目以降は
+    // ユーザーが自由に追加できる列（日付・備考など）で、表示専用（ロジックには影響しない）
+    function renderCurriculumTable(gradeData, grade) {
+      const columns = (gradeData.columns && gradeData.columns.length > 0) ? gradeData.columns : ['教材名'];
+      const rows = gradeData.rows || [];
+      const colCount = columns.length;
+
+      const headerCells = columns.map((colName, colIdx) => `
+        <th class="border py-1 px-1 ${colIdx === 0 ? 'text-left' : ''}">
+          <div class="flex items-center gap-1">
+            <input type="text" class="curriculum-col-input w-full border-0 bg-transparent p-1 text-xs font-bold text-gray-700 outline-none focus:bg-yellow-50" data-grade="${grade}" data-col="${colIdx}" value="${String(colName).replace(/"/g, '&quot;')}" ${colIdx === 0 ? 'title="教材名（自動割り当てに使用）"' : ''} />
+            ${colIdx > 0 ? `<button data-action="curriculum-delete-col" data-grade="${grade}" data-col="${colIdx}" class="text-red-400 hover:text-red-600 text-xs px-1" title="この列を削除">✕</button>` : ''}
+          </div>
+        </th>
+      `).join('');
+
+      const rowsHtml = rows.map((row, rowIdx) => `
         <tr>
-          <td class="text-center text-gray-400 bg-gray-50 w-10 border">${idx + 1}</td>
-          <td class="p-0 border">
-            <input type="text" class="curriculum-topic-input w-full border-0 p-2 text-sm focus:bg-yellow-50 outline-none" data-grade="${grade}" data-index="${idx}" value="${String(topic).replace(/"/g, '&quot;')}" />
-          </td>
+          <td class="text-center text-gray-400 bg-gray-50 w-10 border">${rowIdx + 1}</td>
+          ${columns.map((_, colIdx) => `
+            <td class="p-0 border">
+              <input type="text" class="curriculum-cell-input w-full border-0 p-2 text-sm focus:bg-yellow-50 outline-none" data-grade="${grade}" data-row="${rowIdx}" data-col="${colIdx}" value="${String(row[colIdx] || '').replace(/"/g, '&quot;')}" />
+            </td>
+          `).join('')}
           <td class="whitespace-nowrap text-center border bg-gray-50">
-            <button data-action="curriculum-move" data-grade="${grade}" data-index="${idx}" data-dir="-1" class="px-1 text-gray-500 disabled:opacity-20" ${idx === 0 ? 'disabled' : ''}>▲</button>
-            <button data-action="curriculum-move" data-grade="${grade}" data-index="${idx}" data-dir="1" class="px-1 text-gray-500 disabled:opacity-20" ${idx === list.length - 1 ? 'disabled' : ''}>▼</button>
-            <button data-action="curriculum-delete" data-grade="${grade}" data-index="${idx}" class="text-red-500 px-1 font-bold">✕</button>
+            <button data-action="curriculum-move" data-grade="${grade}" data-index="${rowIdx}" data-dir="-1" class="px-1 text-gray-500 disabled:opacity-20" ${rowIdx === 0 ? 'disabled' : ''}>▲</button>
+            <button data-action="curriculum-move" data-grade="${grade}" data-index="${rowIdx}" data-dir="1" class="px-1 text-gray-500 disabled:opacity-20" ${rowIdx === rows.length - 1 ? 'disabled' : ''}>▼</button>
+            <button data-action="curriculum-delete" data-grade="${grade}" data-index="${rowIdx}" class="text-red-500 px-1 font-bold">✕</button>
           </td>
         </tr>
       `).join('');
+
       return `
         <div class="overflow-x-auto border rounded">
           <table class="w-full text-sm bg-white border-collapse">
             <thead>
               <tr class="bg-gray-100">
                 <th class="w-10 border py-1">#</th>
-                <th class="border py-1 text-left px-2">教材名</th>
-                <th class="w-28 border py-1"></th>
+                ${headerCells}
+                <th class="w-28 border py-1">
+                  <button data-action="curriculum-add-col" data-grade="${grade}" class="text-teal-600 hover:text-teal-800 text-xs font-bold px-1" title="列を追加">＋列</button>
+                </th>
               </tr>
             </thead>
-            <tbody>${rows || `<tr><td colspan="3" class="text-center text-gray-400 italic py-4 border">教材が登録されていません</td></tr>`}</tbody>
+            <tbody>${rowsHtml || `<tr><td colspan="${colCount + 2}" class="text-center text-gray-400 italic py-4 border">教材が登録されていません</td></tr>`}</tbody>
           </table>
         </div>
       `;
@@ -1205,7 +1238,7 @@
 
       const offsetRowsHtml = classCodes.length > 0
         ? classCodes.map(code => {
-            const list = curriculumListForClassCode(code, appState.curriculum) || [];
+            const list = curriculumTopicsForClassCode(code, appState.curriculum) || [];
             const offset = offsets[code] || 0;
             const nextTopic = list.length === 0 ? '（教材未登録）' : (list[offset] || '（リストの範囲外）');
             return `
@@ -1238,11 +1271,13 @@
           <button id="btn-save-curriculum-progress" class="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white rounded font-semibold shadow mb-6">開始設定を保存</button>
 
           <h3 class="font-bold text-gray-700 mb-2 border-l-4 border-indigo-500 pl-2">1年生の教材リスト</h3>
-          <div class="mb-2">${renderCurriculumTable(appState.curriculum.grade1 || [], 'grade1')}</div>
+          <p class="text-xs text-gray-500 mb-2">「教材名」列は自動割り当てに使われます。「＋列」ボタンで日付・備考などの列を自由に追加できます。</p>
+          <div class="mb-2">${renderCurriculumTable(appState.curriculum.grade1, 'grade1')}</div>
           <button data-action="curriculum-add" data-grade="grade1" class="w-full mb-6 py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 行を追加</button>
 
           <h3 class="font-bold text-gray-700 mb-2 border-l-4 border-purple-500 pl-2">3年生の教材リスト</h3>
-          <div class="mb-2">${renderCurriculumTable(appState.curriculum.grade3 || [], 'grade3')}</div>
+          <p class="text-xs text-gray-500 mb-2">「教材名」列は自動割り当てに使われます。「＋列」ボタンで日付・備考などの列を自由に追加できます。</p>
+          <div class="mb-2">${renderCurriculumTable(appState.curriculum.grade3, 'grade3')}</div>
           <button data-action="curriculum-add" data-grade="grade3" class="w-full py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 行を追加</button>
         </div>
       `;
@@ -1250,25 +1285,35 @@
       document.getElementById('btn-save-curriculum-progress').addEventListener('click', saveCurriculumProgressFromForm);
     }
 
-    async function saveCurriculumList(grade, list) {
+    async function saveCurriculumGrade(grade, gradeData) {
       const docRef = doc(db, "users", appState.currentUserId, "settings", "curriculum");
-      await setDoc(docRef, { ...appState.curriculum, [grade]: list });
+      await setDoc(docRef, { ...appState.curriculum, [grade]: gradeData });
     }
 
-    // 教材リスト（スプレッドシート風の表）のセルを直接編集したら保存する
+    // 教材リスト（複数列の表）のセルまたは列名を直接編集したら保存する
     viewContainer.addEventListener('change', async (e) => {
-      const input = e.target.closest('.curriculum-topic-input');
-      if (!input) return;
-      const grade = input.dataset.grade;
-      const idx = parseInt(input.dataset.index);
-      const val = input.value.trim();
-      const list = [...(appState.curriculum[grade] || [])];
-      list[idx] = val;
-      await saveCurriculumList(grade, list);
+      const cellInput = e.target.closest('.curriculum-cell-input');
+      const colInput = e.target.closest('.curriculum-col-input');
+      if (cellInput) {
+        const grade = cellInput.dataset.grade;
+        const rowIdx = parseInt(cellInput.dataset.row);
+        const colIdx = parseInt(cellInput.dataset.col);
+        const gradeData = appState.curriculum[grade];
+        const rows = gradeData.rows.map(r => [...r]);
+        rows[rowIdx][colIdx] = cellInput.value.trim();
+        await saveCurriculumGrade(grade, { columns: gradeData.columns, rows });
+      } else if (colInput) {
+        const grade = colInput.dataset.grade;
+        const colIdx = parseInt(colInput.dataset.col);
+        const gradeData = appState.curriculum[grade];
+        const columns = [...gradeData.columns];
+        columns[colIdx] = colInput.value.trim() || (colIdx === 0 ? '教材名' : `列${colIdx + 1}`);
+        await saveCurriculumGrade(grade, { columns, rows: gradeData.rows });
+      }
     });
     // Enterキーでセルの編集を確定できるようにする
     viewContainer.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && e.target.classList.contains('curriculum-topic-input')) {
+      if (e.key === 'Enter' && (e.target.classList.contains('curriculum-cell-input') || e.target.classList.contains('curriculum-col-input'))) {
         e.target.blur();
       }
     });
@@ -1356,27 +1401,57 @@
         const addBtn = e.target.closest('button[data-action="curriculum-add"]');
         const delBtn = e.target.closest('button[data-action="curriculum-delete"]');
         const moveBtn = e.target.closest('button[data-action="curriculum-move"]');
+        const addColBtn = e.target.closest('button[data-action="curriculum-add-col"]');
+        const delColBtn = e.target.closest('button[data-action="curriculum-delete-col"]');
 
         if (addBtn) {
           const grade = addBtn.dataset.grade;
-          await saveCurriculumList(grade, [...(appState.curriculum[grade] || []), '']);
+          const gradeData = appState.curriculum[grade];
+          const newRow = gradeData.columns.map(() => '');
+          await saveCurriculumGrade(grade, { columns: gradeData.columns, rows: [...gradeData.rows, newRow] });
         } else if (delBtn) {
           const grade = delBtn.dataset.grade;
           const idx = parseInt(delBtn.dataset.index);
           if (confirm("この教材を削除しますか？後ろの教材が1つずつ前にずれます。")) {
-            const list = [...appState.curriculum[grade]];
-            list.splice(idx, 1);
-            await saveCurriculumList(grade, list);
+            const gradeData = appState.curriculum[grade];
+            const rows = [...gradeData.rows];
+            rows.splice(idx, 1);
+            await saveCurriculumGrade(grade, { columns: gradeData.columns, rows });
           }
         } else if (moveBtn) {
           const grade = moveBtn.dataset.grade;
           const idx = parseInt(moveBtn.dataset.index);
           const dir = parseInt(moveBtn.dataset.dir);
-          const list = [...appState.curriculum[grade]];
+          const gradeData = appState.curriculum[grade];
+          const rows = [...gradeData.rows];
           const newIdx = idx + dir;
-          if (newIdx >= 0 && newIdx < list.length) {
-            [list[idx], list[newIdx]] = [list[newIdx], list[idx]];
-            await saveCurriculumList(grade, list);
+          if (newIdx >= 0 && newIdx < rows.length) {
+            [rows[idx], rows[newIdx]] = [rows[newIdx], rows[idx]];
+            await saveCurriculumGrade(grade, { columns: gradeData.columns, rows });
+          }
+        } else if (addColBtn) {
+          const grade = addColBtn.dataset.grade;
+          const colName = prompt("追加する列の名前を入力してください（例：日付、備考）", "");
+          if (colName === null) return;
+          const gradeData = appState.curriculum[grade];
+          const name = colName.trim() || `列${gradeData.columns.length + 1}`;
+          const columns = [...gradeData.columns, name];
+          const rows = gradeData.rows.map(r => [...r, '']);
+          await saveCurriculumGrade(grade, { columns, rows });
+        } else if (delColBtn) {
+          const grade = delColBtn.dataset.grade;
+          const colIdx = parseInt(delColBtn.dataset.col);
+          if (colIdx === 0) return; // 教材名列は削除不可
+          if (confirm("この列を削除しますか？")) {
+            const gradeData = appState.curriculum[grade];
+            const columns = [...gradeData.columns];
+            columns.splice(colIdx, 1);
+            const rows = gradeData.rows.map(r => {
+              const nr = [...r];
+              nr.splice(colIdx, 1);
+              return nr;
+            });
+            await saveCurriculumGrade(grade, { columns, rows });
           }
         }
       }
