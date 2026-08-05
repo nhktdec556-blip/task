@@ -1079,10 +1079,23 @@
       return modelId;
     }
 
+    // 年度またぎ（1〜3月）の年判定を誤らないよう、プロンプトに埋め込む共通の年度ガイド文言。
+    // 資料自体に西暦年の記載がなくても、本日の日付と4月始まり年度の慣習から
+    // 正しい西暦年を推測できるようにする（例: 8月時点で「1月」とだけ書かれていれば翌年1月）。
+    function buildYearGuidance() {
+      const today = formatDateStr(new Date());
+      return `
+        ・本日の日付は${today}です。多くの日本の中学校・高校は4月始まり3月終わりの年度制（学校年度）です。
+        ・資料に西暦年の記載がない、または月だけしか分からない場合は、本日の日付を基準に学校年度の慣習に沿って正しい西暦年を判断してください。特に1月・2月・3月は、学校年度としては前年の4月から続く年度の終わり（＝4月始まりの年から見て翌年）であることが多いため、安易に本日と同じ年や資料中の他の月と同じ年にせず、学校年度のつながりを踏まえて判断してください。
+        ・資料自体に「2027年1月」のように明確な西暦年の記載がある場合は、必ずそちらを優先してください。
+      `;
+    }
+
     // 月報・週報から校内行事予定/個人予定/時間割変更/週間時間割を抽出するメインのプロンプト
     // （日付ごとの授業振替・特別スケジュールは精度を上げるため、専用のアップロード機能側の
     // プロンプトで別途処理する）
-    const MAIN_SCAN_PROMPT = `
+    function buildMainScanPrompt() {
+      return `
         あなたは優秀な中学校のスケジュールアシスタントです。
         アップロードされたファイルは、中学校の月報（月間行事予定表）または週報（PDFまたは画像）です。
         月報は日付ごと・週ごとにマス目やカレンダー形式、あるいは表形式で校内行事予定が並んでいることが多く、レイアウトが崩れて見えても、日付と行事名の対応関係を丁寧に読み取ってください。
@@ -1098,6 +1111,7 @@
         ・推測で予定を作らないでください。
         ・ファイルに記載されていない日付・コマのデータは出力しないでください。
         ・資料に年度・月の記載がある場合はそれをもとにYYYY-MM-DD形式の日付へ正しく変換してください。
+        ${buildYearGuidance()}
         ・同じ日に複数の行事がある場合は、それぞれを別々の配列要素として出力してください。
         ・Markdownのバッククォート（\`\`\`json など）は絶対に含めず、純粋なJSON配列のみを出力してください。
         ・出力トークンを節約するため、改行・インデント・余分な空白を一切入れず、必ず1行の圧縮されたJSON配列として出力してください。
@@ -1105,10 +1119,12 @@
         【出力フォーマット（実際は改行を入れず1行で出力すること）】
         [{"date": "YYYY-MM-DD", "type": "行事", "text": "始業式（短縮日課）"}, {"date": "YYYY-MM-DD", "type": "石川", "text": "14:00 教科部会"}, {"date": "YYYY-MM-DD", "type": "変更", "text": "3限の授業カット"}, {"type": "時間割", "day": "月", "period": 1, "text": "3-4 社会"}]
       `;
+    }
 
     // 授業時数カウント専用：日付ごとの授業振替・特別スケジュール（学年・時限単位）だけを
     // 抽出することに特化したプロンプト。他の情報と混ぜないことで抽出精度を上げる。
-    const SWAP_SCAN_PROMPT = `
+    function buildSwapScanPrompt() {
+      return `
         あなたは中学校の授業スケジュールデータ抽出の専門アシスタントです。
         アップロードされたファイル（月報の一部、PDFまたは画像）には、各日付・各学年（1・2・3など）・各時限（1〜6限）について、その実際の日付のその時限に何が行われるかを示す表があります。
 
@@ -1122,12 +1138,14 @@
         ・推測で値を作らないでください。
         ・ファイルに記載されていない日付・学年・時限のデータは出力しないでください。
         ・資料に年度・月の記載がある場合はそれをもとにYYYY-MM-DD形式の日付へ正しく変換してください。
+        ${buildYearGuidance()}
         ・Markdownのバッククォート（\`\`\`json など）は絶対に含めず、純粋なJSON配列のみを出力してください。
         ・出力トークンを節約するため、改行・インデント・余分な空白を一切入れず、必ず1行の圧縮されたJSON配列として出力してください。
 
         【出力フォーマット（実際は改行を入れず1行で出力すること）】
         [{"date": "YYYY-MM-DD", "grade": "1", "period": 1, "value": "火1"}, {"date": "YYYY-MM-DD", "grade": "1", "period": 2, "value": "テスト"}]
       `;
+    }
 
     async function callGeminiAPI(base64Data, mimeType, prompt) {
       // ローカルストレージからAPIキーを取得
@@ -1235,7 +1253,7 @@
         const base64Data = await fileToBase64(file);
         
         // 🚨 取得したAPIキーを使って通信を開始
-        const extractedEvents = await callGeminiAPI(base64Data, file.type, MAIN_SCAN_PROMPT);
+        const extractedEvents = await callGeminiAPI(base64Data, file.type, buildMainScanPrompt());
         
         progress.classList.add('hidden');
         
@@ -1379,7 +1397,7 @@
 
       try {
         const base64Data = await fileToBase64(file);
-        const extractedSwaps = await callGeminiAPI(base64Data, file.type, SWAP_SCAN_PROMPT);
+        const extractedSwaps = await callGeminiAPI(base64Data, file.type, buildSwapScanPrompt());
 
         progress.classList.add('hidden');
 
