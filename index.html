@@ -76,6 +76,7 @@
       <button data-view="year" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">年間</button>
       <button data-view="class-matrix" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">週授業</button>
       <button data-view="lesson-count" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">時数</button>
+      <button data-view="curriculum" class="tab-btn px-2 py-1 md:px-3 rounded-md text-gray-300 whitespace-nowrap">教材</button>
     </nav>
     <div class="flex items-center ml-2 space-x-2">
       <button id="btn-scan" class="bg-blue-600 hover:bg-blue-500 p-1 md:px-2 rounded text-sm flex items-center shadow whitespace-nowrap" title="週報スキャン">📸</button>
@@ -231,7 +232,9 @@
       weeklyTimetable: {},
       vacations: [],
       dayTab: 'schedule', // 'schedule'(学校の予定) | 'class'(授業の予定) - 日/週ビュー共通のタブ状態
-      weekTab: 'schedule'
+      weekTab: 'schedule',
+      curriculum: { grade1: [], grade3: [] }, // 学年ごとの教材（単元）の並び順リスト
+      curriculumProgress: { baselineDate: null, offsets: {} } // クラスごとの開始位置と、自動集計を始める基準日
     };
 
     const viewContainer = document.getElementById('view-container');
@@ -246,6 +249,9 @@
     // 長期休業期間（夏休み等）のリスナー。授業時数カウントで、月報に記載のない休業日を
     // 通常授業日として誤カウントしないようにするために使用する
     let unsubscribeVacationsListener = null;
+    // 教材（単元）の並び順リストと、クラスごとの進度（開始位置）のリスナー
+    let unsubscribeCurriculumListener = null;
+    let unsubscribeCurriculumProgressListener = null;
 
     function subscribeWeeklyTimetable() {
       if (unsubscribeTimetableListener) {
@@ -278,6 +284,36 @@
     // 指定した日付(YYYY-MM-DD)が、登録済みの長期休業期間のいずれかに含まれるか判定する
     function isVacationDate(dateStr, vacations) {
       return (vacations || []).some(v => v.start <= dateStr && dateStr <= v.end);
+    }
+
+    function subscribeCurriculum() {
+      if (unsubscribeCurriculumListener) {
+        unsubscribeCurriculumListener();
+        unsubscribeCurriculumListener = null;
+      }
+      const docRef = doc(db, "users", appState.currentUserId, "settings", "curriculum");
+      unsubscribeCurriculumListener = onSnapshot(docRef, (docSnap) => {
+        const data = docSnap.exists() ? docSnap.data() : {};
+        appState.curriculum = { grade1: data.grade1 || [], grade3: data.grade3 || [] };
+        renderView();
+      }, (e) => {
+        console.error("Error loading curriculum:", e);
+      });
+    }
+
+    function subscribeCurriculumProgress() {
+      if (unsubscribeCurriculumProgressListener) {
+        unsubscribeCurriculumProgressListener();
+        unsubscribeCurriculumProgressListener = null;
+      }
+      const docRef = doc(db, "users", appState.currentUserId, "settings", "curriculum_progress");
+      unsubscribeCurriculumProgressListener = onSnapshot(docRef, (docSnap) => {
+        const data = docSnap.exists() ? docSnap.data() : {};
+        appState.curriculumProgress = { baselineDate: data.baselineDate || null, offsets: data.offsets || {} };
+        renderView();
+      }, (e) => {
+        console.error("Error loading curriculum progress:", e);
+      });
     }
 
     function formatDateStr(dateObj) {
@@ -351,11 +387,15 @@
         loadDataForCurrentDate();
         subscribeWeeklyTimetable();
         subscribeVacations();
+        subscribeCurriculum();
+        subscribeCurriculumProgress();
       } else {
         appState.currentUserId = null;
         if (unsubscribeDayListener) { unsubscribeDayListener(); unsubscribeDayListener = null; }
         if (unsubscribeTimetableListener) { unsubscribeTimetableListener(); unsubscribeTimetableListener = null; }
         if (unsubscribeVacationsListener) { unsubscribeVacationsListener(); unsubscribeVacationsListener = null; }
+        if (unsubscribeCurriculumListener) { unsubscribeCurriculumListener(); unsubscribeCurriculumListener = null; }
+        if (unsubscribeCurriculumProgressListener) { unsubscribeCurriculumProgressListener(); unsubscribeCurriculumProgressListener = null; }
         loginScreen.classList.remove('hidden');
       }
     });
@@ -505,6 +545,52 @@
       return result;
     }
 
+    // 指定した日付範囲について、クラスコードごとに実際の授業の出現順リストを作る。
+    // 「授業の予定」（classSchedule）を保存済みの日はそれを、未保存の日は振替データからの
+    // 計算結果を使う（日/週ビューの表示と同じ実データソース）。教材（カリキュラム）の自動割り当てに使用。
+    async function computeClassOccurrences(startStr, endStr) {
+      const overridesMap = await fetchPeriodOverridesInRange(startStr, endStr);
+      const classScheduleMap = await fetchClassScheduleInRange(startStr, endStr);
+      const timetable = appState.weeklyTimetable || {};
+      const vacations = appState.vacations || [];
+
+      const occurrencesByClass = {}; // classCode -> [{dateStr, period}] (日付・限の昇順)
+      const cur = new Date(`${startStr}T00:00:00`);
+      const end = new Date(`${endStr}T00:00:00`);
+      while (cur <= end) {
+        const dateStr = formatDateStr(cur);
+        let entries;
+        if (classScheduleMap[dateStr] !== undefined) {
+          entries = classScheduleMap[dateStr].map(text => ({ text, period: null }));
+        } else {
+          entries = resolveActualClasses(cur, timetable, overridesMap[dateStr], vacations);
+        }
+        entries.forEach(entry => {
+          const m = String(entry.text).match(/(\d+-\d+)/);
+          if (!m) return;
+          const classCode = m[1];
+          if (!occurrencesByClass[classCode]) occurrencesByClass[classCode] = [];
+          occurrencesByClass[classCode].push({ dateStr, period: entry.period, text: entry.text });
+        });
+        cur.setDate(cur.getDate() + 1);
+      }
+      return occurrencesByClass;
+    }
+
+    // クラスコードから学年を判定し、対応する教材（カリキュラム）リストを返す
+    function curriculumListForClassCode(classCode, curriculum) {
+      const grade = classCode.split('-')[0];
+      if (grade === '1') return curriculum.grade1 || [];
+      if (grade === '3') return curriculum.grade3 || [];
+      return null;
+    }
+
+    // occurrencesByClassの中で、指定した出現（dateStr・period・text一致）が何番目か(0始まり)を返す
+    function findOccurrenceIndex(occurrencesByClass, classCode, dateStr, period, text) {
+      const list = occurrencesByClass[classCode] || [];
+      return list.findIndex(o => o.dateStr === dateStr && o.period === period && o.text === text);
+    }
+
     // 日付ごとの授業振替・特別スケジュール（学年→時限→表記）をplanner_dataにマージ保存する。
     // 授業時数カウント専用アップロードの反映処理から呼び出す。
     async function applyPeriodOverrideUpdates(overridesByDate) {
@@ -539,10 +625,11 @@
       switch (appState.currentView) {
         case 'month': await renderMonthView(); break;
         case 'week': await renderWeekView(); break;
-        case 'day': renderDayView(); break;
+        case 'day': await renderDayView(); break;
         case 'year': await renderYearView(); break;
         case 'class-matrix': renderClassMatrix(); break;
         case 'lesson-count': await renderLessonCountView(); break;
+        case 'curriculum': renderCurriculumView(); break;
       }
 
       if (animationClass) {
@@ -662,11 +749,11 @@
 
     // 編集可能な予定リスト（events/schoolEvents/classSchedule共通）を<li>のHTMLに変換する
     function renderEditableList(items, target, opts) {
-      const { bgClass, borderClass, textClass, icon, emptyText } = opts;
+      const { bgClass, borderClass, textClass, icon, emptyText, decorate } = opts;
       let html = items.length > 0
         ? items.map((item, idx) => `
             <li class="p-3 ${bgClass} rounded border ${borderClass} mb-2 flex justify-between items-center shadow-sm">
-              <span class="flex-1 ${textClass} font-medium">${icon}${item.text || item}</span>
+              <span class="flex-1 ${textClass} font-medium">${icon}${item.text || item}${decorate ? decorate(item, idx) : ''}</span>
               <div class="space-x-1 flex-shrink-0">
                 <button data-action="edit-item" data-target="${target}" data-index="${idx}" class="text-blue-500 bg-white border border-blue-200 px-2 py-1 rounded text-xs font-bold">編集</button>
                 <button data-action="delete-item" data-target="${target}" data-index="${idx}" class="text-red-500 bg-white border border-red-200 px-2 py-1 rounded text-xs font-bold">削除</button>
@@ -682,7 +769,7 @@
       return html;
     }
 
-    function renderDayView() {
+    async function renderDayView() {
       const dateColor = (appState.dayData.timetableType !== '通常') ? 'text-red-600 border-red-600 bg-red-50' : 'text-gray-800 border-gray-300';
       const dateStrDisplay = `${appState.currentDate.getFullYear()}年${appState.currentDate.getMonth() + 1}月${appState.currentDate.getDate()}日`;
       const tab = appState.dayTab || 'schedule';
@@ -707,9 +794,34 @@
             .map(c => `${c.period}限 ${c.text}`);
         }
         const classSchedule = appState.dayData.classSchedule || [];
+
+        // 教材データベースが設定されていれば、基準日から今日までの実際の授業回数を数えて
+        // 各授業に対応する教材（単元）を自動で割り当てて表示する
+        let decorate = null;
+        const baselineDate = appState.curriculumProgress.baselineDate;
+        const hasCurriculum = (appState.curriculum.grade1 || []).length > 0 || (appState.curriculum.grade3 || []).length > 0;
+        if (baselineDate && hasCurriculum) {
+          const todayStr = formatDateStr(appState.currentDate);
+          const rangeEnd = todayStr > baselineDate ? todayStr : baselineDate;
+          const occurrencesByClass = await computeClassOccurrences(baselineDate, rangeEnd);
+          decorate = (item) => {
+            const text = item.text || item;
+            const m = String(text).match(/(\d+-\d+)/);
+            if (!m) return '';
+            const classCode = m[1];
+            const list = curriculumListForClassCode(classCode, appState.curriculum);
+            if (!list) return '';
+            const idx = findOccurrenceIndex(occurrencesByClass, classCode, todayStr, null, text);
+            if (idx === -1) return '';
+            const offset = (appState.curriculumProgress.offsets || {})[classCode] || 0;
+            const topic = list[offset + idx];
+            return topic ? `<span class="block text-xs text-indigo-500 mt-0.5">📘 ${topic}</span>` : '';
+          };
+        }
+
         const listHtml = renderEditableList(classSchedule, 'classSchedule', {
           bgClass: 'bg-indigo-50', borderClass: 'border-indigo-100', textClass: 'text-indigo-900',
-          icon: '🎓 ', emptyText: '授業の予定はありません'
+          icon: '🎓 ', emptyText: '授業の予定はありません', decorate
         });
         bodyHtml = `
           <div class="flex justify-between items-center mb-3">
@@ -1010,6 +1122,102 @@
       document.getElementById('btn-open-vacation-settings').addEventListener('click', openVacationSettingsModal);
     }
 
+    // 週間時間割から、社会科を担当しているクラスコード一覧を求める（教材の開始位置設定用）
+    function getSocialStudiesClassCodes(timetable) {
+      const codes = new Set();
+      Object.values(timetable || {}).forEach(text => {
+        const classCode = parseClassCode(text);
+        if (!/^\d+-\d+$/.test(classCode)) return;
+        const subject = String(text).slice(classCode.length).trim();
+        if (subject === '社会') codes.add(classCode);
+      });
+      return Array.from(codes).sort();
+    }
+
+    function renderCurriculumListItems(list, grade) {
+      if (list.length === 0) return `<p class="text-gray-400 italic text-sm py-2">教材が登録されていません</p>`;
+      return list.map((topic, idx) => `
+        <li class="p-2 bg-gray-50 border rounded mb-1 flex items-center justify-between text-sm">
+          <span class="flex-1"><span class="text-gray-400 mr-2">${idx + 1}.</span>${topic}</span>
+          <div class="space-x-1 flex-shrink-0 whitespace-nowrap">
+            <button data-action="curriculum-move" data-grade="${grade}" data-index="${idx}" data-dir="-1" class="px-1 text-gray-500 disabled:opacity-30" ${idx === 0 ? 'disabled' : ''}>▲</button>
+            <button data-action="curriculum-move" data-grade="${grade}" data-index="${idx}" data-dir="1" class="px-1 text-gray-500 disabled:opacity-30" ${idx === list.length - 1 ? 'disabled' : ''}>▼</button>
+            <button data-action="curriculum-edit" data-grade="${grade}" data-index="${idx}" class="text-blue-500 bg-white border border-blue-200 px-2 py-0.5 rounded text-xs font-bold">編集</button>
+            <button data-action="curriculum-delete" data-grade="${grade}" data-index="${idx}" class="text-red-500 bg-white border border-red-200 px-2 py-0.5 rounded text-xs font-bold">削除</button>
+          </div>
+        </li>
+      `).join('');
+    }
+
+    function renderCurriculumView() {
+      const classCodes = getSocialStudiesClassCodes(appState.weeklyTimetable || {});
+      const offsets = appState.curriculumProgress.offsets || {};
+      const baselineDate = appState.curriculumProgress.baselineDate || formatDateStr(new Date());
+
+      const offsetRowsHtml = classCodes.length > 0
+        ? classCodes.map(code => {
+            const list = curriculumListForClassCode(code, appState.curriculum) || [];
+            const offset = offsets[code] || 0;
+            const nextTopic = list.length === 0 ? '（教材未登録）' : (list[offset] || '（リストの範囲外）');
+            return `
+              <tr>
+                <td class="font-bold text-center bg-gray-50">${code}</td>
+                <td class="text-center"><input type="number" min="0" class="curriculum-offset-input w-16 border rounded p-1 text-center" data-class="${code}" value="${offset}"></td>
+                <td class="text-sm text-gray-600 px-2">${nextTopic}</td>
+              </tr>
+            `;
+          }).join('')
+        : `<tr><td colspan="3" class="text-center text-gray-400 italic py-4">週間時間割が登録されていません</td></tr>`;
+
+      const html = `
+        <div class="p-3 bg-gray-50 border-b">
+          <div class="font-bold text-lg">教材データベース</div>
+        </div>
+        <div class="flex-1 overflow-auto p-4">
+          <h3 class="font-bold text-gray-700 mb-2 border-l-4 border-teal-500 pl-2">開始位置の設定</h3>
+          <p class="text-xs text-gray-500 mb-2">基準日より後の「授業の予定」に登録された実際の授業回数をもとに、教材を自動で順番に割り当てます。すでに授業を行っている分は、開始位置（いくつ目の教材まで終えたか）に反映してください。</p>
+          <div class="mb-3">
+            <label class="text-sm font-semibold text-gray-600 mr-2">基準日</label>
+            <input type="date" id="curriculum-baseline-input" value="${baselineDate}" class="border border-gray-300 rounded p-1 text-sm bg-gray-50" />
+          </div>
+          <div class="overflow-x-auto">
+            <table class="matrix-table text-sm bg-white mb-3">
+              <thead><tr class="bg-gray-100"><th>クラス</th><th>開始位置</th><th>次のトピック</th></tr></thead>
+              <tbody>${offsetRowsHtml}</tbody>
+            </table>
+          </div>
+          <button id="btn-save-curriculum-progress" class="px-4 py-2 bg-teal-600 hover:bg-teal-500 text-white rounded font-semibold shadow mb-6">開始設定を保存</button>
+
+          <h3 class="font-bold text-gray-700 mb-2 border-l-4 border-indigo-500 pl-2">1年生の教材リスト</h3>
+          <ul class="mb-2">${renderCurriculumListItems(appState.curriculum.grade1 || [], 'grade1')}</ul>
+          <button data-action="curriculum-add" data-grade="grade1" class="w-full mb-6 py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 教材を追加</button>
+
+          <h3 class="font-bold text-gray-700 mb-2 border-l-4 border-purple-500 pl-2">3年生の教材リスト</h3>
+          <ul class="mb-2">${renderCurriculumListItems(appState.curriculum.grade3 || [], 'grade3')}</ul>
+          <button data-action="curriculum-add" data-grade="grade3" class="w-full py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 教材を追加</button>
+        </div>
+      `;
+      viewContainer.innerHTML = html;
+      document.getElementById('btn-save-curriculum-progress').addEventListener('click', saveCurriculumProgressFromForm);
+    }
+
+    async function saveCurriculumList(grade, list) {
+      const docRef = doc(db, "users", appState.currentUserId, "settings", "curriculum");
+      await setDoc(docRef, { ...appState.curriculum, [grade]: list });
+    }
+
+    async function saveCurriculumProgressFromForm() {
+      const baselineDate = document.getElementById('curriculum-baseline-input').value;
+      if (!baselineDate) return alert("基準日を入力してください");
+      const offsets = {};
+      document.querySelectorAll('.curriculum-offset-input').forEach(input => {
+        offsets[input.dataset.class] = parseInt(input.value) || 0;
+      });
+      const docRef = doc(db, "users", appState.currentUserId, "settings", "curriculum_progress");
+      await setDoc(docRef, { baselineDate, offsets });
+      alert("開始設定を保存しました。");
+    }
+
     // === ナビゲーション & クリックイベント ===
     viewContainer.addEventListener('click', async (e) => {
       const action = e.target.closest('[data-action]');
@@ -1074,6 +1282,49 @@
           appState.dayData.classSchedule = dedupeEvents([...(appState.dayData.classSchedule || []), ...computed]);
           await saveCurrentDayData();
           renderView();
+        }
+      }
+
+      if (appState.currentView === 'curriculum') {
+        const addBtn = e.target.closest('button[data-action="curriculum-add"]');
+        const editBtn = e.target.closest('button[data-action="curriculum-edit"]');
+        const delBtn = e.target.closest('button[data-action="curriculum-delete"]');
+        const moveBtn = e.target.closest('button[data-action="curriculum-move"]');
+
+        if (addBtn) {
+          const grade = addBtn.dataset.grade;
+          const val = prompt("追加する教材名を入力してください（例: アメリカ州4）");
+          if (val && val.trim()) {
+            await saveCurriculumList(grade, [...(appState.curriculum[grade] || []), val.trim()]);
+          }
+        } else if (editBtn) {
+          const grade = editBtn.dataset.grade;
+          const idx = parseInt(editBtn.dataset.index);
+          const current = appState.curriculum[grade][idx];
+          const val = prompt("教材名を編集してください", current);
+          if (val && val.trim()) {
+            const list = [...appState.curriculum[grade]];
+            list[idx] = val.trim();
+            await saveCurriculumList(grade, list);
+          }
+        } else if (delBtn) {
+          const grade = delBtn.dataset.grade;
+          const idx = parseInt(delBtn.dataset.index);
+          if (confirm("この教材を削除しますか？後ろの教材が1つずつ前にずれます。")) {
+            const list = [...appState.curriculum[grade]];
+            list.splice(idx, 1);
+            await saveCurriculumList(grade, list);
+          }
+        } else if (moveBtn) {
+          const grade = moveBtn.dataset.grade;
+          const idx = parseInt(moveBtn.dataset.index);
+          const dir = parseInt(moveBtn.dataset.dir);
+          const list = [...appState.curriculum[grade]];
+          const newIdx = idx + dir;
+          if (newIdx >= 0 && newIdx < list.length) {
+            [list[idx], list[newIdx]] = [list[newIdx], list[idx]];
+            await saveCurriculumList(grade, list);
+          }
         }
       }
     });
