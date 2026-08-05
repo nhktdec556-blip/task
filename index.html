@@ -281,14 +281,52 @@
       return `${dateObj.getFullYear()}-${String(dateObj.getMonth() + 1).padStart(2, '0')}-${String(dateObj.getDate()).padStart(2, '0')}`;
     }
 
-    // 指定した日付（曜日）に石川先生が担当する授業コマを1〜6限の順で返す
-    function getClassesForDate(dateObj) {
+    // 指定した実際の日付に石川先生が担当する授業コマを1〜6限の順で返す。
+    // 授業時数カウントと同じロジック（振替・長期休業）を使い、日/週ビューの表示と
+    // 実際のデータをリンクさせる（週間時間割だけの単純な曜日パターンにはしない）。
+    function resolveActualClasses(dateObj, timetable, dayOverrides, vacations) {
+      const dateStr = formatDateStr(dateObj);
+      if (isVacationDate(dateStr, vacations)) return [];
+
       const jpWeekdays = ['日', '月', '火', '水', '木', '金', '土'];
-      const weekday = jpWeekdays[dateObj.getDay()];
-      const timetable = appState.weeklyTimetable || {};
-      return [1, 2, 3, 4, 5, 6]
-        .map(period => ({ period, text: timetable[`${weekday}-${period}`] }))
-        .filter(c => c.text);
+      const realWeekday = jpWeekdays[dateObj.getDay()];
+      if (!['月', '火', '水', '木', '金'].includes(realWeekday)) return [];
+
+      const naturalTextMap = {}; // `${曜日}-${限}` -> コマの内容（全教科対象、社会科に絞らない）
+      Object.entries(timetable).forEach(([key, text]) => {
+        const classCode = parseClassCode(text);
+        if (!/^\d+-\d+$/.test(classCode)) return; // 「会議」等クラス表記でない項目は対象外
+        naturalTextMap[key] = text;
+      });
+      const gradeOf = (text) => parseClassCode(text).split('-')[0];
+      const grades = Array.from(new Set(Object.values(naturalTextMap).map(gradeOf)));
+
+      const results = [];
+      for (let period = 1; period <= 6; period++) {
+        let found = null;
+        grades.forEach(grade => {
+          const override = dayOverrides && dayOverrides[grade] && dayOverrides[grade][String(period)];
+          if (override !== undefined) {
+            const m = SWAP_PATTERN.exec(override);
+            if (m) {
+              const text = naturalTextMap[`${m[1]}-${Number(m[2])}`];
+              if (text && gradeOf(text) === grade) found = text;
+            } else {
+              // テスト・学活等の固定表記：石川先生がこの学年・この時間に本来授業を
+              // 持っている場合のみ、その内容（テスト等）に変わったものとして表示する
+              const naturalOwnText = naturalTextMap[`${realWeekday}-${period}`];
+              if (naturalOwnText && gradeOf(naturalOwnText) === grade) {
+                found = `${parseClassCode(naturalOwnText)} ${override}`;
+              }
+            }
+          } else {
+            const text = naturalTextMap[`${realWeekday}-${period}`];
+            if (text && gradeOf(text) === grade) found = text;
+          }
+        });
+        if (found) results.push({ period, text: found });
+      }
+      return results;
     }
 
     // 同一内容の予定が重複登録されるのを防ぐ（一括反映を複数回押した場合など）
@@ -541,6 +579,7 @@
       const endStr = `${endDate.getMonth() + 1}/${endDate.getDate()}`;
 
       const schoolEventsMap = await fetchSchoolEventsInRange(formatDateStr(d), formatDateStr(endDate));
+      const overridesMap = await fetchPeriodOverridesInRange(formatDateStr(d), formatDateStr(endDate));
 
       let html = `
         <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
@@ -559,7 +598,7 @@
         const isToday = (currentLoopDate.toDateString() === new Date().toDateString());
         const bgClass = isToday ? "bg-blue-50" : "bg-white";
         const dayEvents = schoolEventsMap[dateStr] || [];
-        const dayClasses = getClassesForDate(currentLoopDate);
+        const dayClasses = resolveActualClasses(currentLoopDate, appState.weeklyTimetable || {}, overridesMap[dateStr], appState.vacations);
         const schoolHtml = dayEvents.map(ev => `<div class="text-xs bg-red-50 text-red-700 rounded px-1 mb-0.5 truncate">🏫 ${ev}</div>`).join('');
         const classHtml = dayClasses.slice(0, 2).map(c => `<div class="text-xs bg-indigo-50 text-indigo-700 rounded px-1 mb-0.5 truncate">🎓 ${c.period}限 ${c.text}</div>`).join('');
         const classMoreHtml = dayClasses.length > 2 ? `<div class="text-[10px] text-gray-400">+${dayClasses.length - 2}コマ</div>` : '';
@@ -594,7 +633,7 @@
           `).join('')
         : '<p class="text-gray-400 italic mb-2 text-sm">校内行事予定はありません</p>';
 
-      const todaysClasses = getClassesForDate(appState.currentDate);
+      const todaysClasses = resolveActualClasses(appState.currentDate, appState.weeklyTimetable || {}, appState.dayData.periodOverrides, appState.vacations);
       let classesHtml = todaysClasses.length > 0
         ? todaysClasses.map(c => `
             <li class="p-3 bg-indigo-50 rounded border border-indigo-100 mb-2 flex items-center shadow-sm">
