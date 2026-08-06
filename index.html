@@ -233,7 +233,7 @@
       vacations: [],
       dayTab: 'schedule', // 'schedule'(学校の予定) | 'class'(授業の予定) - 日/週ビュー共通のタブ状態
       weekTab: 'schedule',
-      curriculum: { grade1: { columns: ['教材名'], rows: [] }, grade3: { columns: ['教材名'], rows: [] } }, // 学年ごとの教材リスト（列を自由に追加できる表形式。1列目は教材名で自動割り当てに使用）
+      curriculum: { grade1: { columns: ['教材名', '予定時数'], rows: [] }, grade3: { columns: ['教材名', '予定時数'], rows: [] } }, // 学年ごとの教材リスト（列を自由に追加できる表形式。1・2列目は教材名／予定時数の固定列）
       curriculumProgress: { baselineDate: null, offsets: {}, gradeEndDates: {} } // クラスごとの開始位置、自動集計を始める基準日、学年ごとの目標終了日
     };
 
@@ -286,16 +286,25 @@
       return (vacations || []).some(v => v.start <= dateStr && dateStr <= v.end);
     }
 
-    // 教材データを表形式（columns/rows）に正規化する。旧バージョン（文字列配列）で保存されたデータも
-    // 自動的に「教材名」列1つの表として読み込めるようにする（後方互換のための移行処理）
+    // 教材データを表形式（columns/rows）に正規化する。旧バージョン（文字列配列）で保存されたデータや、
+    // まだ「予定時数」列を追加していない表も、自動的に「教材名」「予定時数」の2列を持つ表として
+    // 読み込めるようにする（後方互換のための移行処理。「予定時数」は列を自分で追加しなくても
+    // 最初から使える固定列とする）
     function normalizeCurriculumGrade(raw) {
+      let gradeData;
       if (Array.isArray(raw)) {
-        return { columns: ['教材名'], rows: raw.map(topic => [topic]) };
+        gradeData = { columns: ['教材名'], rows: raw.map(topic => [topic]) };
+      } else if (raw && Array.isArray(raw.columns) && raw.columns.length > 0 && Array.isArray(raw.rows)) {
+        gradeData = { columns: raw.columns, rows: raw.rows.map(row => Array.isArray(row) ? row : []) };
+      } else {
+        gradeData = { columns: ['教材名'], rows: [] };
       }
-      if (raw && Array.isArray(raw.columns) && raw.columns.length > 0 && Array.isArray(raw.rows)) {
-        return { columns: raw.columns, rows: raw.rows.map(row => Array.isArray(row) ? row : []) };
+      const hoursIdx = gradeData.columns.findIndex(c => String(c).trim() === '予定時数');
+      if (hoursIdx === -1) {
+        gradeData.columns = [gradeData.columns[0], '予定時数', ...gradeData.columns.slice(1)];
+        gradeData.rows = gradeData.rows.map(row => [row[0] || '', '1', ...row.slice(1)]);
       }
-      return { columns: ['教材名'], rows: [] };
+      return gradeData;
     }
 
     function subscribeCurriculum() {
@@ -1288,18 +1297,20 @@
     }
 
     // 教材リストを複数列を持つ本格的な表（スプレッドシート風）として描画する
-    // 1列目（教材名）は自動割り当てのロジックに使われる特別な列で削除不可。2列目以降は
-    // ユーザーが自由に追加できる列（日付・備考など）で、表示専用（ロジックには影響しない）
+    // 1列目（教材名）と「予定時数」列は自動割り当て・時数計算のロジックに使われる固定列で削除不可。
+    // それ以外の列はユーザーが自由に追加できる列（日付・備考など）で、表示専用（ロジックには影響しない）
     function renderCurriculumTable(gradeData, grade) {
       const columns = (gradeData.columns && gradeData.columns.length > 0) ? gradeData.columns : ['教材名'];
       const rows = gradeData.rows || [];
       const colCount = columns.length;
+      const isFixedCol = (colIdx) => colIdx === 0 || String(columns[colIdx]).trim() === '予定時数';
+      const isHoursCol = (colIdx) => String(columns[colIdx]).trim() === '予定時数';
 
       const headerCells = columns.map((colName, colIdx) => `
         <th class="border py-1 px-1 ${colIdx === 0 ? 'text-left' : ''}">
           <div class="flex items-center gap-1">
-            <input type="text" class="curriculum-col-input w-full border-0 bg-transparent p-1 text-xs font-bold text-gray-700 outline-none focus:bg-yellow-50" data-grade="${grade}" data-col="${colIdx}" value="${String(colName).replace(/"/g, '&quot;')}" ${colIdx === 0 ? 'title="教材名（自動割り当てに使用）"' : ''} />
-            ${colIdx > 0 ? `<button data-action="curriculum-delete-col" data-grade="${grade}" data-col="${colIdx}" class="text-red-400 hover:text-red-600 text-xs px-1" title="この列を削除">✕</button>` : ''}
+            <input type="text" class="curriculum-col-input w-full border-0 bg-transparent p-1 text-xs font-bold text-gray-700 outline-none focus:bg-yellow-50" data-grade="${grade}" data-col="${colIdx}" value="${String(colName).replace(/"/g, '&quot;')}" ${colIdx === 0 ? 'title="教材名（自動割り当てに使用）"' : ''} ${isHoursCol(colIdx) ? 'title="予定時数（この単元に何コマ使うか。時数配分の計算に使用）"' : ''} />
+            ${!isFixedCol(colIdx) ? `<button data-action="curriculum-delete-col" data-grade="${grade}" data-col="${colIdx}" class="text-red-400 hover:text-red-600 text-xs px-1" title="この列を削除">✕</button>` : ''}
           </div>
         </th>
       `).join('');
@@ -1309,7 +1320,7 @@
           <td class="text-center text-gray-400 bg-gray-50 w-10 border">${rowIdx + 1}</td>
           ${columns.map((_, colIdx) => `
             <td class="p-0 border">
-              <input type="text" class="curriculum-cell-input w-full border-0 p-2 text-sm focus:bg-yellow-50 outline-none" data-grade="${grade}" data-row="${rowIdx}" data-col="${colIdx}" value="${String(row[colIdx] || '').replace(/"/g, '&quot;')}" />
+              <input type="${isHoursCol(colIdx) ? 'number' : 'text'}" ${isHoursCol(colIdx) ? 'min="0" step="0.5"' : ''} class="curriculum-cell-input w-full border-0 p-2 text-sm focus:bg-yellow-50 outline-none ${isHoursCol(colIdx) ? 'text-center' : ''}" data-grade="${grade}" data-row="${rowIdx}" data-col="${colIdx}" value="${String(row[colIdx] || '').replace(/"/g, '&quot;')}" />
             </td>
           `).join('')}
           <td class="whitespace-nowrap text-center border bg-gray-50">
@@ -1433,12 +1444,12 @@
           ${progressHtml}
 
           <h3 class="font-bold text-gray-700 mb-2 border-l-4 border-indigo-500 pl-2">1年生の教材リスト</h3>
-          <p class="text-xs text-gray-500 mb-2">「教材名」列は自動割り当てに使われます。時数配分を計算したい場合は「＋列」で「予定時数」という名前の列を追加し、単元ごとの時数を入力してください。日付・備考などの列も自由に追加できます。</p>
+          <p class="text-xs text-gray-500 mb-2">単元名と、その単元に何コマ使うか（予定時数）を入力すると、週予定・日予定に「単元名（1/予定時数）」のように自動で反映されます。日付・備考などの列も「＋列」で自由に追加できます。</p>
           <div class="mb-2">${renderCurriculumTable(appState.curriculum.grade1, 'grade1')}</div>
           <button data-action="curriculum-add" data-grade="grade1" class="w-full mb-6 py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 行を追加</button>
 
           <h3 class="font-bold text-gray-700 mb-2 border-l-4 border-purple-500 pl-2">3年生の教材リスト</h3>
-          <p class="text-xs text-gray-500 mb-2">「教材名」列は自動割り当てに使われます。時数配分を計算したい場合は「＋列」で「予定時数」という名前の列を追加し、単元ごとの時数を入力してください。日付・備考などの列も自由に追加できます。</p>
+          <p class="text-xs text-gray-500 mb-2">単元名と、その単元に何コマ使うか（予定時数）を入力すると、週予定・日予定に「単元名（1/予定時数）」のように自動で反映されます。日付・備考などの列も「＋列」で自由に追加できます。</p>
           <div class="mb-2">${renderCurriculumTable(appState.curriculum.grade3, 'grade3')}</div>
           <button data-action="curriculum-add" data-grade="grade3" class="w-full py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 行を追加</button>
         </div>
@@ -1573,7 +1584,7 @@
         if (addBtn) {
           const grade = addBtn.dataset.grade;
           const gradeData = appState.curriculum[grade];
-          const newRow = gradeData.columns.map(() => '');
+          const newRow = gradeData.columns.map(col => String(col).trim() === '予定時数' ? '1' : '');
           await saveCurriculumGrade(grade, { columns: gradeData.columns, rows: [...gradeData.rows, newRow] });
         } else if (delBtn) {
           const grade = delBtn.dataset.grade;
@@ -1607,7 +1618,9 @@
         } else if (delColBtn) {
           const grade = delColBtn.dataset.grade;
           const colIdx = parseInt(delColBtn.dataset.col);
-          if (colIdx === 0) return; // 教材名列は削除不可
+          const gradeData0 = appState.curriculum[grade];
+          const colName = String(gradeData0.columns[colIdx] || '').trim();
+          if (colIdx === 0 || colName === '予定時数') return; // 教材名・予定時数列は削除不可
           if (confirm("この列を削除しますか？")) {
             const gradeData = appState.curriculum[grade];
             const columns = [...gradeData.columns];
