@@ -1474,9 +1474,24 @@
       document.getElementById('btn-save-curriculum-progress').addEventListener('click', saveCurriculumProgressFromForm);
     }
 
+    // grade（grade1/grade3）ごとにFirestoreへの書き込みを直列化するキュー。
+    // セルをすばやく連続編集すると、前の保存がまだFirestoreと往復し終わる前に
+    // 次の編集が発生することがある。そのとき保存処理がappState.curriculumの
+    // 「サーバーから返ってきた古い状態」を読んでしまうと、直前の編集が
+    // 上書きされて消えてしまう（＝保存されないように見える）。
+    // これを防ぐため、(1) 編集した内容を待たずに即座にappState.curriculumへ
+    // 反映し、以降の編集は必ずこの最新のローカル状態の上に積み重なるようにし、
+    // (2) 保存自体もgradeごとに前の保存が完了してから送るようにして、
+    // Firestoreへの書き込み順序が編集順序と入れ替わらないようにする。
+    const curriculumSaveQueue = { grade1: Promise.resolve(), grade3: Promise.resolve() };
     async function saveCurriculumGrade(grade, gradeData) {
+      appState.curriculum[grade] = gradeData;
       const docRef = doc(db, "users", appState.currentUserId, "settings", "curriculum");
-      await setDoc(docRef, { ...appState.curriculum, [grade]: gradeData });
+      const task = curriculumSaveQueue[grade].then(
+        () => setDoc(docRef, { ...appState.curriculum, [grade]: gradeData })
+      );
+      curriculumSaveQueue[grade] = task.catch((e) => { console.error("Error saving curriculum:", e); });
+      await task;
     }
 
     // 教材リスト（複数列の表）のセルまたは列名を直接編集したら保存する
