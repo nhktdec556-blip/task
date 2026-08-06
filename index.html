@@ -253,6 +253,22 @@
     let unsubscribeCurriculumListener = null;
     let unsubscribeCurriculumProgressListener = null;
 
+    // 教材タブのセル・列名・開始位置・終了日の入力欄を今まさに編集中かどうかを判定する。
+    // 編集中にFirestoreのonSnapshotで画面全体が再描画されると、入力中の内容がDOMごと
+    // 消えて「変更が保存されない」ように見えるバグになるため、編集中は再描画を見送る。
+    function isEditingCurriculumInput() {
+      const el = document.activeElement;
+      if (!el || !viewContainer.contains(el)) return false;
+      if (el.classList && (el.classList.contains('curriculum-cell-input') || el.classList.contains('curriculum-col-input') || el.classList.contains('curriculum-offset-input'))) return true;
+      return ['curriculum-baseline-input', 'curriculum-end-date-grade1', 'curriculum-end-date-grade3'].includes(el.id);
+    }
+
+    // onSnapshotによる再描画で編集中の教材入力欄を巻き込んで消してしまわないようにするラッパー
+    function renderViewUnlessEditingCurriculum() {
+      if (isEditingCurriculumInput()) return;
+      renderView();
+    }
+
     function subscribeWeeklyTimetable() {
       if (unsubscribeTimetableListener) {
         unsubscribeTimetableListener();
@@ -261,7 +277,7 @@
       const docRef = doc(db, "users", appState.currentUserId, "settings", "weekly_timetable");
       unsubscribeTimetableListener = onSnapshot(docRef, (docSnap) => {
         appState.weeklyTimetable = docSnap.exists() ? docSnap.data() : {};
-        renderView();
+        renderViewUnlessEditingCurriculum();
       }, (e) => {
         console.error("Error loading weekly timetable:", e);
       });
@@ -275,7 +291,7 @@
       const docRef = doc(db, "users", appState.currentUserId, "settings", "school_calendar");
       unsubscribeVacationsListener = onSnapshot(docRef, (docSnap) => {
         appState.vacations = (docSnap.exists() && docSnap.data().vacations) ? docSnap.data().vacations : [];
-        renderView();
+        renderViewUnlessEditingCurriculum();
       }, (e) => {
         console.error("Error loading vacations:", e);
       });
@@ -316,7 +332,7 @@
       unsubscribeCurriculumListener = onSnapshot(docRef, (docSnap) => {
         const data = docSnap.exists() ? docSnap.data() : {};
         appState.curriculum = { grade1: normalizeCurriculumGrade(data.grade1), grade3: normalizeCurriculumGrade(data.grade3) };
-        renderView();
+        renderViewUnlessEditingCurriculum();
       }, (e) => {
         console.error("Error loading curriculum:", e);
       });
@@ -331,7 +347,7 @@
       unsubscribeCurriculumProgressListener = onSnapshot(docRef, (docSnap) => {
         const data = docSnap.exists() ? docSnap.data() : {};
         appState.curriculumProgress = { baselineDate: data.baselineDate || null, offsets: data.offsets || {}, gradeEndDates: data.gradeEndDates || {} };
-        renderView();
+        renderViewUnlessEditingCurriculum();
       }, (e) => {
         console.error("Error loading curriculum progress:", e);
       });
