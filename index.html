@@ -310,6 +310,23 @@
       return (vacations || []).some(v => v.start <= dateStr && dateStr <= v.end);
     }
 
+    // Firestoreは「配列の中に配列を直接ネストする」ことをサポートしていない（setDoc/updateDocが
+    // 例外を投げて保存に失敗する）。教材リストの各行(row)はアプリ内部では配列として扱いたいので、
+    // 保存前に {c0: 値, c1: 値, ...} という（ネストしていない）オブジェクトの配列に変換し、
+    // 読み込み時にまた配列へ戻す。教材の保存がずっと失敗していた（＝何も保存されていなかった）
+    // 不具合の直接の原因がこれだった。
+    function rowToFirestoreMap(row) {
+      const obj = {};
+      row.forEach((v, i) => { obj[`c${i}`] = (v === undefined || v === null) ? '' : v; });
+      return obj;
+    }
+    function rowFromFirestoreValue(row, columnCount) {
+      if (Array.isArray(row)) return row; // 後方互換（万一すでに配列のまま保存されていた場合）
+      const arr = [];
+      for (let i = 0; i < columnCount; i++) arr.push((row && row[`c${i}`]) || '');
+      return arr;
+    }
+
     // 教材データを表形式（columns/rows）に正規化する。旧バージョン（文字列配列）で保存されたデータや、
     // まだ「予定時数」列を追加していない表も、自動的に「教材名」「予定時数」の2列を持つ表として
     // 読み込めるようにする（後方互換のための移行処理。「予定時数」は列を自分で追加しなくても
@@ -319,7 +336,7 @@
       if (Array.isArray(raw)) {
         gradeData = { columns: ['教材名'], rows: raw.map(topic => [topic]) };
       } else if (raw && Array.isArray(raw.columns) && raw.columns.length > 0 && Array.isArray(raw.rows)) {
-        gradeData = { columns: raw.columns, rows: raw.rows.map(row => Array.isArray(row) ? row : []) };
+        gradeData = { columns: raw.columns, rows: raw.rows.map(row => rowFromFirestoreValue(row, raw.columns.length)) };
       } else {
         gradeData = { columns: ['教材名'], rows: [] };
       }
@@ -1515,11 +1532,19 @@
     // (2) 保存自体もgradeごとに前の保存が完了してから送るようにして、
     // Firestoreへの書き込み順序が編集順序と入れ替わらないようにする。
     const curriculumSaveQueue = { grade1: Promise.resolve(), grade3: Promise.resolve() };
+    // アプリ内部の{columns, rows}（rowsは配列の配列）を、Firestoreに保存できる形
+    // （rowsを{c0,c1,...}のオブジェクトの配列にしたもの）に変換する
+    function gradeDataToFirestoreValue(gd) {
+      return { columns: gd.columns, rows: gd.rows.map(rowToFirestoreMap) };
+    }
     async function saveCurriculumGrade(grade, gradeData) {
       appState.curriculum[grade] = gradeData;
       const docRef = doc(db, "users", appState.currentUserId, "settings", "curriculum");
       const task = curriculumSaveQueue[grade].then(
-        () => setDoc(docRef, { ...appState.curriculum, [grade]: gradeData })
+        () => setDoc(docRef, {
+          grade1: gradeDataToFirestoreValue(appState.curriculum.grade1),
+          grade3: gradeDataToFirestoreValue(appState.curriculum.grade3)
+        })
       );
       curriculumSaveQueue[grade] = task.catch((e) => { console.error("Error saving curriculum:", e); });
       await task;
@@ -1721,6 +1746,9 @@
           try {
             await saveCurriculumGrade(grade, appState.curriculum[grade]);
             appState.curriculumDirty[grade] = false;
+          } catch (err) {
+            console.error("教材の保存に失敗しました:", err);
+            alert("教材の保存に失敗しました。もう一度お試しください。\n\n" + (err && err.message ? err.message : err));
           } finally {
             saveGradeBtn.textContent = '保存';
             refreshCurriculumTableUI(grade);
