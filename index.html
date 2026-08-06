@@ -635,11 +635,14 @@
           const count = runningCount[classCode] || 0;
           const offsetUnits = offsets[classCode] || 0;
           const offsetHours = boundaries.slice(0, offsetUnits).reduce((s, b) => s + b.hours, 0);
-          const unitIdx = unitIndexAtPosition(boundaries, offsetHours + count);
-          const topic = unitIdx >= 0 ? list[unitIdx] : null;
+          const position = offsetHours + count;
+          const unitIdx = unitIndexAtPosition(boundaries, position);
+          const topicInfo = unitIdx >= 0
+            ? { topic: list[unitIdx], hourWithinUnit: position - boundaries[unitIdx].start + 1, totalUnitHours: boundaries[unitIdx].hours }
+            : null;
           if (!assignments[classCode]) assignments[classCode] = {};
           if (!assignments[classCode][dateStr]) assignments[classCode][dateStr] = [];
-          assignments[classCode][dateStr].push(topic);
+          assignments[classCode][dateStr].push(topicInfo);
           runningCount[classCode] = count + 1;
         });
         cur.setDate(cur.getDate() + 1);
@@ -719,6 +722,12 @@
         if (String(t).includes(classCode)) count++;
       }
       return count;
+    }
+
+    // computeCurriculumAssignmentsが返すトピック情報を「単元名（今何時間目/合計何時間）」の表示用文字列にする
+    function formatTopicLabel(topicInfo) {
+      if (!topicInfo || !topicInfo.topic) return '';
+      return `${topicInfo.topic}（${topicInfo.hourWithinUnit}/${topicInfo.totalUnitHours}）`;
     }
 
     // 日付ごとの授業振替・特別スケジュール（学年→時限→表記）をplanner_dataにマージ保存する。
@@ -868,8 +877,8 @@
             if (m) {
               const dayTopics = (weekAssignments[m[1]] && weekAssignments[m[1]][dateStr]) || [];
               const posWithinDay = occurrenceIndexWithinDay(dayClasses, idx, m[1]);
-              const topic = dayTopics[posWithinDay];
-              if (topic) topicHtml = ` - ${topic}`;
+              const label = formatTopicLabel(dayTopics[posWithinDay]);
+              if (label) topicHtml = ` - 📘 ${label}`;
             }
             return `<div class="text-xs bg-indigo-50 text-indigo-700 rounded px-1 mb-0.5 truncate">🎓 ${c.period ? `${c.period}限 ` : ''}${text}${topicHtml}</div>`;
           }).join('');
@@ -958,8 +967,8 @@
             const classCode = m[1];
             const dayTopics = (assignments[classCode] && assignments[classCode][todayStr]) || [];
             const posWithinDay = occurrenceIndexWithinDay(classSchedule, idx, classCode);
-            const topic = dayTopics[posWithinDay];
-            return topic ? `<span class="block text-xs text-indigo-500 mt-0.5">📘 ${topic}</span>` : '';
+            const label = formatTopicLabel(dayTopics[posWithinDay]);
+            return label ? `<span class="block text-xs text-indigo-500 mt-0.5">📘 ${label}</span>` : '';
           };
         }
 
