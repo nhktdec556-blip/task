@@ -234,7 +234,8 @@
       dayTab: 'schedule', // 'schedule'(学校の予定) | 'class'(授業の予定) - 日/週ビュー共通のタブ状態
       weekTab: 'schedule',
       curriculum: { grade1: { columns: ['教材名', '予定時数'], rows: [] }, grade3: { columns: ['教材名', '予定時数'], rows: [] } }, // 学年ごとの教材リスト（列を自由に追加できる表形式。1・2列目は教材名／予定時数の固定列）
-      curriculumProgress: { baselineDate: null, offsets: {}, gradeEndDates: {} } // クラスごとの開始位置、自動集計を始める基準日、学年ごとの目標終了日
+      curriculumProgress: { baselineDate: null, offsets: {}, gradeEndDates: {} }, // クラスごとの開始位置、自動集計を始める基準日、学年ごとの目標終了日
+      curriculumDirty: { grade1: false, grade3: false } // 教材リストが「保存」ボタンを押すまで未保存の編集を持っているか
     };
 
     const viewContainer = document.getElementById('view-container');
@@ -263,9 +264,16 @@
       return ['curriculum-baseline-input', 'curriculum-end-date-grade1', 'curriculum-end-date-grade3'].includes(el.id);
     }
 
-    // onSnapshotによる再描画で編集中の教材入力欄を巻き込んで消してしまわないようにするラッパー
+    // 教材リスト（grade1/grade3）が「保存」ボタンを押すまでの未保存の編集を持っているかどうか
+    function hasUnsavedCurriculumEdits() {
+      return !!(appState.curriculumDirty && (appState.curriculumDirty.grade1 || appState.curriculumDirty.grade3));
+    }
+
+    // onSnapshotによる再描画で、編集中の教材入力欄や保存前の未保存編集を巻き込んで
+    // 消してしまわないようにするラッパー
     function renderViewUnlessEditingCurriculum() {
       if (isEditingCurriculumInput()) return;
+      if (appState.currentView === 'curriculum' && hasUnsavedCurriculumEdits()) return;
       renderView();
     }
 
@@ -331,7 +339,10 @@
       const docRef = doc(db, "users", appState.currentUserId, "settings", "curriculum");
       unsubscribeCurriculumListener = onSnapshot(docRef, (docSnap) => {
         const data = docSnap.exists() ? docSnap.data() : {};
-        appState.curriculum = { grade1: normalizeCurriculumGrade(data.grade1), grade3: normalizeCurriculumGrade(data.grade3) };
+        // 保存ボタンを押すまでの未保存編集がある学年は、サーバーの内容で上書きしない
+        // （そうしないと、保存前にリモートの更新が届いた瞬間に編集中の内容が消えてしまう）
+        if (!appState.curriculumDirty.grade1) appState.curriculum.grade1 = normalizeCurriculumGrade(data.grade1);
+        if (!appState.curriculumDirty.grade3) appState.curriculum.grade3 = normalizeCurriculumGrade(data.grade3);
         renderViewUnlessEditingCurriculum();
       }, (e) => {
         console.error("Error loading curriculum:", e);
@@ -1460,18 +1471,38 @@
           ${progressHtml}
 
           <h3 class="font-bold text-gray-700 mb-2 border-l-4 border-indigo-500 pl-2">1年生の教材リスト</h3>
-          <p class="text-xs text-gray-500 mb-2">単元名と、その単元に何コマ使うか（予定時数）を入力すると、週予定・日予定に「単元名（1/予定時数）」のように自動で反映されます。日付・備考などの列も「＋列」で自由に追加できます。</p>
-          <div class="mb-2">${renderCurriculumTable(appState.curriculum.grade1, 'grade1')}</div>
-          <button data-action="curriculum-add" data-grade="grade1" class="w-full mb-6 py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 行を追加</button>
+          <p class="text-xs text-gray-500 mb-2">単元名と、その単元に何コマ使うか（予定時数）を入力すると、週予定・日予定に「単元名（1/予定時数）」のように自動で反映されます。日付・備考などの列も「＋列」で自由に追加できます。編集したら「保存」を押してください。</p>
+          <div id="curriculum-table-grade1" class="mb-2">${renderCurriculumTable(appState.curriculum.grade1, 'grade1')}</div>
+          <div class="flex items-center gap-3 mb-6">
+            <button data-action="curriculum-add" data-grade="grade1" class="flex-1 py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 行を追加</button>
+            <button id="btn-save-curriculum-grade1" data-action="curriculum-save-grade" data-grade="grade1" class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded font-semibold shadow text-sm disabled:opacity-40 disabled:cursor-not-allowed" ${appState.curriculumDirty.grade1 ? '' : 'disabled'}>保存</button>
+          </div>
+          <div id="curriculum-dirty-grade1" class="text-xs text-orange-500 -mt-4 mb-6 ${appState.curriculumDirty.grade1 ? '' : 'hidden'}">未保存の変更があります。「保存」を押してください。</div>
 
           <h3 class="font-bold text-gray-700 mb-2 border-l-4 border-purple-500 pl-2">3年生の教材リスト</h3>
-          <p class="text-xs text-gray-500 mb-2">単元名と、その単元に何コマ使うか（予定時数）を入力すると、週予定・日予定に「単元名（1/予定時数）」のように自動で反映されます。日付・備考などの列も「＋列」で自由に追加できます。</p>
-          <div class="mb-2">${renderCurriculumTable(appState.curriculum.grade3, 'grade3')}</div>
-          <button data-action="curriculum-add" data-grade="grade3" class="w-full py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 行を追加</button>
+          <p class="text-xs text-gray-500 mb-2">単元名と、その単元に何コマ使うか（予定時数）を入力すると、週予定・日予定に「単元名（1/予定時数）」のように自動で反映されます。日付・備考などの列も「＋列」で自由に追加できます。編集したら「保存」を押してください。</p>
+          <div id="curriculum-table-grade3" class="mb-2">${renderCurriculumTable(appState.curriculum.grade3, 'grade3')}</div>
+          <div class="flex items-center gap-3">
+            <button data-action="curriculum-add" data-grade="grade3" class="flex-1 py-2 border-2 border-dashed border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 font-semibold text-sm">＋ 行を追加</button>
+            <button id="btn-save-curriculum-grade3" data-action="curriculum-save-grade" data-grade="grade3" class="px-4 py-2 bg-purple-600 hover:bg-purple-500 text-white rounded font-semibold shadow text-sm disabled:opacity-40 disabled:cursor-not-allowed" ${appState.curriculumDirty.grade3 ? '' : 'disabled'}>保存</button>
+          </div>
+          <div id="curriculum-dirty-grade3" class="text-xs text-orange-500 mt-2 ${appState.curriculumDirty.grade3 ? '' : 'hidden'}">未保存の変更があります。「保存」を押してください。</div>
         </div>
       `;
       viewContainer.innerHTML = html;
       document.getElementById('btn-save-curriculum-progress').addEventListener('click', saveCurriculumProgressFromForm);
+    }
+
+    // 教材表（grade1/grade3）だけをその場で作り直す（Firestoreへの書き込みは行わない、
+    // ローカルの未保存編集を表示に反映するための軽量な部分再描画）
+    function refreshCurriculumTableUI(grade) {
+      const tableContainer = document.getElementById(`curriculum-table-${grade}`);
+      if (tableContainer) tableContainer.innerHTML = renderCurriculumTable(appState.curriculum[grade], grade);
+      const isDirty = !!appState.curriculumDirty[grade];
+      const saveBtn = document.getElementById(`btn-save-curriculum-${grade}`);
+      if (saveBtn) saveBtn.disabled = !isDirty;
+      const dirtyLabel = document.getElementById(`curriculum-dirty-${grade}`);
+      if (dirtyLabel) dirtyLabel.classList.toggle('hidden', !isDirty);
     }
 
     // grade（grade1/grade3）ごとにFirestoreへの書き込みを直列化するキュー。
@@ -1494,8 +1525,11 @@
       await task;
     }
 
-    // 教材リスト（複数列の表）のセルまたは列名を直接編集したら保存する
-    viewContainer.addEventListener('change', async (e) => {
+    // 教材リスト（複数列の表）のセルまたは列名を直接編集する。ここではFirestoreへは保存せず、
+    // ローカルの状態を更新して「未保存」の状態にするだけにする（実際の保存は「保存」ボタンで行う。
+    // セルを連続して素早く編集したときに、保存の往復が終わる前に次の編集が発生して
+    // 直前の編集が上書きされて消えてしまう、という不具合を根本的になくすため）
+    viewContainer.addEventListener('change', (e) => {
       const cellInput = e.target.closest('.curriculum-cell-input');
       const colInput = e.target.closest('.curriculum-col-input');
       if (cellInput) {
@@ -1505,14 +1539,18 @@
         const gradeData = appState.curriculum[grade];
         const rows = gradeData.rows.map(r => [...r]);
         rows[rowIdx][colIdx] = cellInput.value.trim();
-        await saveCurriculumGrade(grade, { columns: gradeData.columns, rows });
+        appState.curriculum[grade] = { columns: gradeData.columns, rows };
+        appState.curriculumDirty[grade] = true;
+        refreshCurriculumTableUI(grade);
       } else if (colInput) {
         const grade = colInput.dataset.grade;
         const colIdx = parseInt(colInput.dataset.col);
         const gradeData = appState.curriculum[grade];
         const columns = [...gradeData.columns];
         columns[colIdx] = colInput.value.trim() || (colIdx === 0 ? '教材名' : `列${colIdx + 1}`);
-        await saveCurriculumGrade(grade, { columns, rows: gradeData.rows });
+        appState.curriculum[grade] = { columns, rows: gradeData.rows };
+        appState.curriculumDirty[grade] = true;
+        refreshCurriculumTableUI(grade);
       }
     });
     // Enterキーでセルの編集を確定できるようにする
@@ -1611,12 +1649,17 @@
         const moveBtn = e.target.closest('button[data-action="curriculum-move"]');
         const addColBtn = e.target.closest('button[data-action="curriculum-add-col"]');
         const delColBtn = e.target.closest('button[data-action="curriculum-delete-col"]');
+        const saveGradeBtn = e.target.closest('button[data-action="curriculum-save-grade"]');
 
+        // 行・列の追加/削除/並べ替えも、セル編集と同様にここではFirestoreへ保存せず
+        // ローカルの状態を更新するだけにする（「保存」ボタンを押すまでは未保存の状態）
         if (addBtn) {
           const grade = addBtn.dataset.grade;
           const gradeData = appState.curriculum[grade];
           const newRow = gradeData.columns.map(col => String(col).trim() === '予定時数' ? '1' : '');
-          await saveCurriculumGrade(grade, { columns: gradeData.columns, rows: [...gradeData.rows, newRow] });
+          appState.curriculum[grade] = { columns: gradeData.columns, rows: [...gradeData.rows, newRow] };
+          appState.curriculumDirty[grade] = true;
+          refreshCurriculumTableUI(grade);
         } else if (delBtn) {
           const grade = delBtn.dataset.grade;
           const idx = parseInt(delBtn.dataset.index);
@@ -1624,7 +1667,9 @@
             const gradeData = appState.curriculum[grade];
             const rows = [...gradeData.rows];
             rows.splice(idx, 1);
-            await saveCurriculumGrade(grade, { columns: gradeData.columns, rows });
+            appState.curriculum[grade] = { columns: gradeData.columns, rows };
+            appState.curriculumDirty[grade] = true;
+            refreshCurriculumTableUI(grade);
           }
         } else if (moveBtn) {
           const grade = moveBtn.dataset.grade;
@@ -1635,7 +1680,9 @@
           const newIdx = idx + dir;
           if (newIdx >= 0 && newIdx < rows.length) {
             [rows[idx], rows[newIdx]] = [rows[newIdx], rows[idx]];
-            await saveCurriculumGrade(grade, { columns: gradeData.columns, rows });
+            appState.curriculum[grade] = { columns: gradeData.columns, rows };
+            appState.curriculumDirty[grade] = true;
+            refreshCurriculumTableUI(grade);
           }
         } else if (addColBtn) {
           const grade = addColBtn.dataset.grade;
@@ -1645,7 +1692,9 @@
           const name = colName.trim() || `列${gradeData.columns.length + 1}`;
           const columns = [...gradeData.columns, name];
           const rows = gradeData.rows.map(r => [...r, '']);
-          await saveCurriculumGrade(grade, { columns, rows });
+          appState.curriculum[grade] = { columns, rows };
+          appState.curriculumDirty[grade] = true;
+          refreshCurriculumTableUI(grade);
         } else if (delColBtn) {
           const grade = delColBtn.dataset.grade;
           const colIdx = parseInt(delColBtn.dataset.col);
@@ -1661,7 +1710,20 @@
               nr.splice(colIdx, 1);
               return nr;
             });
-            await saveCurriculumGrade(grade, { columns, rows });
+            appState.curriculum[grade] = { columns, rows };
+            appState.curriculumDirty[grade] = true;
+            refreshCurriculumTableUI(grade);
+          }
+        } else if (saveGradeBtn) {
+          const grade = saveGradeBtn.dataset.grade;
+          saveGradeBtn.disabled = true;
+          saveGradeBtn.textContent = '保存中...';
+          try {
+            await saveCurriculumGrade(grade, appState.curriculum[grade]);
+            appState.curriculumDirty[grade] = false;
+          } finally {
+            saveGradeBtn.textContent = '保存';
+            refreshCurriculumTableUI(grade);
           }
         }
       }
