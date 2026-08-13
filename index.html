@@ -647,6 +647,36 @@
       return -1;
     }
 
+    // 授業予定のテキスト（例:「1-5 社会」「1-5 テスト」「1-5 学活」）を、教材の自動割り当て・
+    // 時数カウントの観点から分類する。
+    // - 'social'：通常どおり教材（単元）を割り当て、時数を1コマ進める
+    // - 'test'：テスト当日。時数を進めない。このクラスの「次の社会のコマ」を'test-return'にする
+    // - 'test-return'：テストの次に来た社会のコマ。テスト返却として扱い、時数を進めない
+    // - 'other'：学活・道徳など社会科以外のコマ。教材の自動割り当て対象外（時数にもテスト返却
+    //   判定にも影響しない）
+    // testReturnPending は呼び出し元が日付順のループの間、クラスコードごとに使い回す状態オブジェクト
+    // ※テキストは「1-5 社会」だけでなく「1限 1-5 社会」のように限数が前に付くこともあるため、
+    //   先頭一致ではなく文字列中のどこにあってもクラスコードを検出できるようにする
+    function classifyScheduleEntry(text, testReturnPending) {
+      const str = String(text);
+      const m = str.match(/(\d+-\d+)/);
+      if (!m) return null;
+      const classCode = m[1];
+      const subject = str.slice(m.index + m[0].length).trim();
+      if (subject === 'テスト') {
+        testReturnPending[classCode] = true;
+        return { classCode, kind: 'test' };
+      }
+      if (subject === '社会') {
+        if (testReturnPending[classCode]) {
+          testReturnPending[classCode] = false;
+          return { classCode, kind: 'test-return' };
+        }
+        return { classCode, kind: 'social' };
+      }
+      return { classCode, kind: 'other' };
+    }
+
     // 指定した日付範囲について、クラスコードごとに実際の授業回数を数え、日付ごとに教材（単元）を
     // 順番に割り当てる。「授業の予定」（classSchedule）を保存済みの日はそれを、未保存の日は
     // 振替データからの計算結果を使う（日/週ビューの表示と同じ実データソース）。
@@ -665,7 +695,8 @@
       const vacations = appState.vacations || [];
       const offsets = appState.curriculumProgress.offsets || {};
 
-      const runningCount = {}; // classCode -> ここまでの出現回数
+      const runningCount = {}; // classCode -> ここまでの出現回数（社会のみ。テスト返却は含めない）
+      const testReturnPending = {}; // classCode -> 直近のテストの次の社会のコマをテスト返却にするかどうか
       const cur = new Date(`${startStr}T00:00:00`);
       const end = new Date(`${endStr}T00:00:00`);
       while (cur <= end) {
@@ -677,13 +708,18 @@
           entries = resolveActualClasses(cur, timetable, overridesMap[dateStr], vacations);
         }
         entries.forEach(entry => {
-          const text = entry.text;
-          const m = String(text).match(/(\d+-\d+)/);
-          if (!m) return;
-          const classCode = m[1];
+          const classified = classifyScheduleEntry(entry.text, testReturnPending);
+          if (!classified || classified.kind === 'test' || classified.kind === 'other') return;
+          const { classCode, kind } = classified;
           const grade = classCode.split('-')[0] === '1' ? appState.curriculum.grade1 : appState.curriculum.grade3;
           const list = curriculumTopicsForClassCode(classCode, appState.curriculum);
           if (!list || list.length === 0) return;
+          if (!assignments[classCode]) assignments[classCode] = {};
+          if (!assignments[classCode][dateStr]) assignments[classCode][dateStr] = [];
+          if (kind === 'test-return') {
+            assignments[classCode][dateStr].push({ special: 'テスト返却' });
+            return; // テスト返却の日は時数を進めない
+          }
           const boundaries = curriculumHourBoundaries(grade);
           const count = runningCount[classCode] || 0;
           const offsetUnits = offsets[classCode] || 0;
@@ -693,8 +729,6 @@
           const topicInfo = unitIdx >= 0
             ? { topic: list[unitIdx], hourWithinUnit: position - boundaries[unitIdx].start + 1, totalUnitHours: boundaries[unitIdx].hours }
             : null;
-          if (!assignments[classCode]) assignments[classCode] = {};
-          if (!assignments[classCode][dateStr]) assignments[classCode][dateStr] = [];
           assignments[classCode][dateStr].push(topicInfo);
           runningCount[classCode] = count + 1;
         });
@@ -726,7 +760,8 @@
       const timetable = appState.weeklyTimetable || {};
       const vacations = appState.vacations || [];
 
-      const confirmedCount = {}; // classCode -> baselineDate以降の確定済み授業回数
+      const confirmedCount = {}; // classCode -> baselineDate以降の確定済み授業回数（社会のみ。テスト・テスト返却・他教科は含めない）
+      const testReturnPending = {};
       const cur = new Date(`${baselineDate}T00:00:00`);
       const end = new Date(`${endDate}T00:00:00`);
       while (cur <= end) {
@@ -738,9 +773,9 @@
           entries = resolveActualClasses(cur, timetable, overridesMap[dateStr], vacations);
         }
         entries.forEach(entry => {
-          const m = String(entry.text).match(/(\d+-\d+)/);
-          if (!m) return;
-          const classCode = m[1];
+          const classified = classifyScheduleEntry(entry.text, testReturnPending);
+          if (!classified || classified.kind !== 'social') return; // テスト・テスト返却・他教科は時数を進めない
+          const { classCode } = classified;
           if (!classCodes.includes(classCode)) return;
           confirmedCount[classCode] = (confirmedCount[classCode] || 0) + 1;
         });
@@ -767,19 +802,28 @@
       return result;
     }
 
-    // 表示用の予定リストの中で、指定したインデックスの項目が「同じクラスコードの中で何番目か」を返す(0始まり)
+    // 表示用の予定リストの中で、指定したインデックスの項目が「同じクラスコードの社会のコマの中で
+    // 何番目か」を返す(0始まり)。computeCurriculumAssignmentsが配列に積むのは社会のコマ（通常の
+    // 割り当て・テスト返却のいずれか）だけなので、ここでも学活・道徳・テスト等は数えないようにして
+    // 位置がずれないようにする
     function occurrenceIndexWithinDay(items, idx, classCode) {
       let count = 0;
       for (let i = 0; i < idx; i++) {
-        const t = items[i].text || items[i];
-        if (String(t).includes(classCode)) count++;
+        const t = String(items[i].text || items[i]);
+        const m = t.match(/(\d+-\d+)/);
+        if (!m || m[1] !== classCode) continue;
+        const subject = t.slice(m.index + m[0].length).trim();
+        if (subject === '社会') count++;
       }
       return count;
     }
 
-    // computeCurriculumAssignmentsが返すトピック情報を「単元名（今何時間目/合計何時間）」の表示用文字列にする
+    // computeCurriculumAssignmentsが返すトピック情報を表示用の文字列にする。
+    // 通常は「単元名（今何時間目/合計何時間）」、テスト返却の日は「テスト返却」と表示する
     function formatTopicLabel(topicInfo) {
-      if (!topicInfo || !topicInfo.topic) return '';
+      if (!topicInfo) return '';
+      if (topicInfo.special) return topicInfo.special;
+      if (!topicInfo.topic) return '';
       return `${topicInfo.topic}（${topicInfo.hourWithinUnit}/${topicInfo.totalUnitHours}）`;
     }
 
@@ -924,10 +968,11 @@
             ? classScheduleMap[dateStr].map(text => ({ text }))
             : resolveActualClasses(currentLoopDate, appState.weeklyTimetable || {}, overridesMap[dateStr], appState.vacations);
           const classHtml = dayClasses.slice(0, 3).map((c, idx) => {
-            const text = c.text || c;
-            const m = String(text).match(/(\d+-\d+)/);
+            const text = String(c.text || c);
+            const m = text.match(/(\d+-\d+)/);
             let topicHtml = '';
-            if (m) {
+            // 社会以外のコマ（学活・道徳・テスト等）には教材（単元）を割り当てない
+            if (m && text.slice(m.index + m[0].length).trim() === '社会') {
               const dayTopics = (weekAssignments[m[1]] && weekAssignments[m[1]][dateStr]) || [];
               const posWithinDay = occurrenceIndexWithinDay(dayClasses, idx, m[1]);
               const label = formatTopicLabel(dayTopics[posWithinDay]);
@@ -1014,9 +1059,12 @@
           const rangeEnd = todayStr > baselineDate ? todayStr : baselineDate;
           const assignments = await computeCurriculumAssignments(baselineDate, rangeEnd);
           decorate = (item, idx) => {
-            const text = item.text || item;
-            const m = String(text).match(/(\d+-\d+)/);
+            const text = String(item.text || item);
+            const m = text.match(/(\d+-\d+)/);
             if (!m) return '';
+            // 社会以外のコマ（学活・道徳・テスト等）には教材（単元）を割り当てない
+            const subject = text.slice(m.index + m[0].length).trim();
+            if (subject !== '社会') return '';
             const classCode = m[1];
             const dayTopics = (assignments[classCode] && assignments[classCode][todayStr]) || [];
             const posWithinDay = occurrenceIndexWithinDay(classSchedule, idx, classCode);
