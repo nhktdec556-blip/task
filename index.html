@@ -677,6 +677,31 @@
       return { classCode, kind: 'other' };
     }
 
+    // dayOverrides（{学年: {限: 値}}）の中に「テスト」という固定表記が1つでもあれば、
+    // その学年は学年全体としてテストがあったとみなす。石川先生がその時間にたまたま
+    // そのクラスの社会を担当していない（＝授業予定の一覧には出てこない）クラスでも、
+    // 学年テストである以上は同じように「次の社会の授業」をテスト返却として扱いたいため。
+    function gradesWithTestToday(dayOverrides) {
+      const grades = new Set();
+      if (!dayOverrides) return grades;
+      Object.entries(dayOverrides).forEach(([grade, periods]) => {
+        Object.values(periods || {}).forEach(value => {
+          if (String(value).trim() === 'テスト') grades.add(grade);
+        });
+      });
+      return grades;
+    }
+
+    // その日、学年全体のテストがあったクラス（getSocialStudiesClassCodesで判明する、
+    // 石川先生が社会を担当している全クラス）について、testReturnPendingを立てる
+    function markGradeWideTestPending(dayOverrides, timetable, testReturnPending) {
+      const testedGrades = gradesWithTestToday(dayOverrides);
+      if (testedGrades.size === 0) return;
+      getSocialStudiesClassCodes(timetable).forEach(code => {
+        if (testedGrades.has(code.split('-')[0])) testReturnPending[code] = true;
+      });
+    }
+
     // 指定した日付範囲について、クラスコードごとに実際の授業回数を数え、日付ごとに教材（単元）を
     // 順番に割り当てる。「授業の予定」（classSchedule）を保存済みの日はそれを、未保存の日は
     // 振替データからの計算結果を使う（日/週ビューの表示と同じ実データソース）。
@@ -701,6 +726,7 @@
       const end = new Date(`${endStr}T00:00:00`);
       while (cur <= end) {
         const dateStr = formatDateStr(cur);
+        markGradeWideTestPending(overridesMap[dateStr], timetable, testReturnPending);
         let entries;
         if (classScheduleMap[dateStr] !== undefined) {
           entries = classScheduleMap[dateStr].map(text => ({ text }));
@@ -766,6 +792,7 @@
       const end = new Date(`${endDate}T00:00:00`);
       while (cur <= end) {
         const dateStr = formatDateStr(cur);
+        markGradeWideTestPending(overridesMap[dateStr], timetable, testReturnPending);
         let entries;
         if (classScheduleMap[dateStr] !== undefined) {
           entries = classScheduleMap[dateStr].map(text => ({ text }));
