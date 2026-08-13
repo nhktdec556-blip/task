@@ -900,6 +900,26 @@
       }
     }
 
+    // 月・週ビューのヘッダーに置く「年」「月」プルダウンのHTMLを作る。選択すると該当する
+    // 年月の1日にジャンプする（週ビューの場合はその1日を含む週が表示される）。
+    // view には 'month' か 'week' を渡し、変更時にどちらのビューへジャンプするか判別する
+    function renderMonthYearSelectHtml(view, year, month0) {
+      let yearOptions = '';
+      for (let y = year - 3; y <= year + 3; y++) {
+        yearOptions += `<option value="${y}" ${y === year ? 'selected' : ''}>${y}年</option>`;
+      }
+      let monthOptions = '';
+      for (let m = 1; m <= 12; m++) {
+        monthOptions += `<option value="${m}" ${m === month0 + 1 ? 'selected' : ''}>${m}月</option>`;
+      }
+      return `
+        <div class="flex items-center gap-1">
+          <select data-action="jump-year" data-view="${view}" class="border border-gray-300 rounded px-1 py-1 text-xs md:text-sm bg-white">${yearOptions}</select>
+          <select data-action="jump-month" data-view="${view}" class="border border-gray-300 rounded px-1 py-1 text-xs md:text-sm bg-white">${monthOptions}</select>
+        </div>
+      `;
+    }
+
     async function renderMonthView() {
       const year = appState.currentDate.getFullYear();
       const month = appState.currentDate.getMonth();
@@ -911,9 +931,10 @@
       const schoolEventsMap = await fetchSchoolEventsInRange(startStr, endStr);
 
       let html = `
-        <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
+        <div class="p-3 bg-gray-50 border-b flex justify-between items-center gap-2 flex-wrap">
           <button data-action="prev-month" class="px-3 py-1 bg-white border rounded shadow-sm font-bold text-gray-600">＜</button>
           <div class="font-bold text-lg cursor-pointer" data-action="today">${year}年 ${month + 1}月</div>
+          ${renderMonthYearSelectHtml('month', year, month)}
           <button data-action="next-month" class="px-3 py-1 bg-white border rounded shadow-sm font-bold text-gray-600">＞</button>
         </div>
         <div class="flex-1 grid grid-cols-7 gap-px bg-gray-200 border-b">
@@ -967,9 +988,10 @@
       }
 
       let html = `
-        <div class="p-3 bg-gray-50 border-b flex justify-between items-center">
+        <div class="p-3 bg-gray-50 border-b flex justify-between items-center gap-2 flex-wrap">
           <button data-action="prev-week" class="px-3 py-1 bg-white border rounded shadow-sm font-bold text-gray-600">＜</button>
           <div class="font-bold text-md cursor-pointer" data-action="today">${startStr} 〜 ${endStr}</div>
+          ${renderMonthYearSelectHtml('week', appState.currentDate.getFullYear(), appState.currentDate.getMonth())}
           <button data-action="next-week" class="px-3 py-1 bg-white border rounded shadow-sm font-bold text-gray-600">＞</button>
         </div>
         <div class="px-3 pt-2 bg-gray-50 border-b">
@@ -1658,6 +1680,20 @@
       if (e.key === 'Enter' && (e.target.classList.contains('curriculum-cell-input') || e.target.classList.contains('curriculum-col-input'))) {
         e.target.blur();
       }
+    });
+
+    // 月・週ビューの「年」「月」プルダウンで選んだ年月の1日にジャンプする
+    // （週ビューの場合は、その1日を含む週が表示される）
+    viewContainer.addEventListener('change', (e) => {
+      const select = e.target.closest('select[data-action="jump-year"], select[data-action="jump-month"]');
+      if (!select) return;
+      const container = select.parentElement;
+      const yearSelect = container.querySelector('select[data-action="jump-year"]');
+      const monthSelect = container.querySelector('select[data-action="jump-month"]');
+      const year = parseInt(yearSelect.value);
+      const month = parseInt(monthSelect.value); // 1〜12
+      appState.currentDate = new Date(year, month - 1, 1);
+      renderView();
     });
 
     async function saveCurriculumProgressFromForm() {
